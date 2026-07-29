@@ -41,6 +41,9 @@ class SettledMarket:
     result: Outcome
     crypto_symbol: str
     settlement_value: float | None = None
+    volume: float | None = None
+    """Contracts traded over the market's life. Zero means nothing was executable in it at any
+    price, so a signal there is a paper opportunity only."""
 
     def as_market_info(self) -> MarketInfo:
         return MarketInfo(
@@ -89,6 +92,14 @@ class WindowResult:
     reconstructed_average: float | None
     settlement_value: float | None
     window_size: int = 60
+    volume: float | None = None
+
+    @property
+    def traded(self) -> bool | None:
+        """Whether this market ever traded. None when the source data did not say."""
+        if self.volume is None:
+            return None
+        return self.volume > 0
 
     @property
     def actionable(self) -> bool:
@@ -190,6 +201,7 @@ def evaluate_window(
         reconstructed_average=reconstructed,
         settlement_value=market.settlement_value,
         window_size=window_size,
+        volume=market.volume,
     )
 
 
@@ -218,6 +230,7 @@ class VariantSummary:
     fired: int
     actionable: int
     actionable_rate: float
+    actionable_traded: int
     false_positives: int
     false_positive_rate: float
     fire_second_histogram: dict[int, int]
@@ -256,6 +269,7 @@ def summarize(results: Iterable[WindowResult]) -> list[VariantSummary]:
                 fired=len(fired),
                 actionable=len(actionable),
                 actionable_rate=len(actionable) / len(group) if group else 0.0,
+                actionable_traded=sum(1 for result in actionable if result.traded),
                 false_positives=len(false_positives),
                 false_positive_rate=len(false_positives) / len(actionable) if actionable else 0.0,
                 fire_second_histogram=dict(sorted(histogram.items())),
@@ -270,7 +284,7 @@ def summarize(results: Iterable[WindowResult]) -> list[VariantSummary]:
 def format_summaries(summaries: Sequence[VariantSummary]) -> str:
     """Render summaries as a plain-text table for terminal output."""
     header = (
-        f"{'variant':<16}{'markets':>9}{'actionable':>12}{'act%':>8}"
+        f"{'variant':<16}{'markets':>9}{'actionable':>12}{'act%':>8}{'traded':>8}"
         f"{'FP':>5}{'FP%':>8}{'med_s':>7}{'div(mean)':>12}"
     )
     lines = [header, "-" * len(header)]
@@ -279,9 +293,12 @@ def format_summaries(summaries: Sequence[VariantSummary]) -> str:
         median = "-" if summary.median_fire_second is None else str(summary.median_fire_second)
         lines.append(
             f"{summary.variant:<16}{summary.markets:>9}{summary.actionable:>12}"
-            f"{summary.actionable_rate * 100:>7.1f}%{summary.false_positives:>5}"
-            f"{summary.false_positive_rate * 100:>7.1f}%{median:>7}{divergence:>12}"
+            f"{summary.actionable_rate * 100:>7.1f}%{summary.actionable_traded:>8}"
+            f"{summary.false_positives:>5}{summary.false_positive_rate * 100:>7.1f}%"
+            f"{median:>7}{divergence:>12}"
         )
+    lines.append("")
+    lines.append("traded = actionable signals in markets that traded at all; the rest are paper only.")
     return "\n".join(lines)
 
 
@@ -310,6 +327,7 @@ def load_settled_markets(path: str | Path) -> list[SettledMarket]:
                     settlement_value=(
                         float(record["settlement_value"]) if record.get("settlement_value") is not None else None
                     ),
+                    volume=float(record["volume"]) if record.get("volume") is not None else None,
                 )
             )
     return markets

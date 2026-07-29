@@ -47,10 +47,19 @@ BINANCE_DATA_API = "https://data-api.binance.vision"
 DEFAULT_PREFIX_TO_SYMBOL = {"KXBTC": "BTC-USD", "KXETH": "ETH-USD"}
 DEFAULT_SYMBOL_TO_BINANCE = {"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT"}
 
-# Kalshi's settled-market payload has not been verified against a live response in this repo.
-# Every field read below is looked up defensively so a mismatch produces an actionable error
-# rather than a silent wrong answer. Run `inspect` first.
-SETTLEMENT_VALUE_KEYS = ("settlement_value", "expiration_value", "settled_value")
+# The settled index level lives in `expiration_value` (a string, e.g. "64398.56").
+#
+# Do NOT reach for `settlement_value_dollars`: that is the per-contract *payout* (0.0000 when the
+# market resolved no, 1.0000 when yes), not the BRTI level the strike is compared against. Using
+# it would silently make every proxy-divergence number garbage while still looking plausible.
+SETTLEMENT_VALUE_KEYS = ("expiration_value", "settlement_value", "settled_value")
+
+# Cumulative contracts traded over the market's life. A market with zero volume never traded at
+# all, so no signal in it was executable regardless of how good the signal was. `liquidity_dollars`
+# is deliberately not used: on a finalized market the book is already torn down, so it reads 0
+# whether or not there was depth during the settlement window.
+VOLUME_KEYS = ("volume_fp", "volume")
+OPEN_INTEREST_KEYS = ("open_interest_fp", "open_interest")
 
 
 def _log(message: str) -> None:
@@ -80,11 +89,17 @@ def _get(client: httpx.Client, url: str, params: dict[str, Any], attempts: int =
 def iter_settled_markets(
     client: httpx.Client, base_url: str, series_ticker: str,
     min_close_ts: int | None, max_close_ts: int | None, page_size: int = 200,
+    status: str = "settled",
 ) -> Iterator[dict]:
-    """Page through settled markets for one series."""
+    """Page through settled markets for one series.
+
+    Note the returned objects carry `status: "finalized"` even when queried with
+    `status=settled` — Kalshi treats the filter as covering both. `--status` exists so that can be
+    changed without a code edit if the counts ever look wrong.
+    """
     cursor: str | None = None
     while True:
-        params: dict[str, Any] = {"series_ticker": series_ticker, "status": "settled", "limit": page_size}
+        params: dict[str, Any] = {"series_ticker": series_ticker, "status": status, "limit": page_size}
         if min_close_ts is not None:
             params["min_close_ts"] = min_close_ts
         if max_close_ts is not None:
@@ -137,10 +152,6 @@ def convert_market(raw: dict, prefix_map: dict[str, str]) -> dict | None:
     if not close_time:
         return None
 
-    settlement_value = next(
-        (raw[key] for key in SETTLEMENT_VALUE_KEYS if raw.get(key) is not None), None
-    )
-
     record = {
         "ticker": ticker,
         "strike_type": strike_type,
@@ -149,9 +160,29 @@ def convert_market(raw: dict, prefix_map: dict[str, str]) -> dict | None:
         "result": result,
         "crypto_symbol": symbol,
     }
+    # Numeric fields arrive as strings on this API ("64398.56"), so everything goes through float.
+    settlement_value = _first_number(raw, SETTLEMENT_VALUE_KEYS)
     if settlement_value is not None:
-        record["settlement_value"] = float(settlement_value)
+        record["settlement_value"] = settlement_value
+    volume = _first_number(raw, VOLUME_KEYS)
+    if volume is not None:
+        record["volume"] = volume
+    open_interest = _first_number(raw, OPEN_INTEREST_KEYS)
+    if open_interest is not None:
+        record["open_interest"] = open_interest
     return record
+
+
+def _first_number(raw: dict, keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = raw.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def cmd_markets(args: argparse.Namespace) -> None:
@@ -163,28 +194,39 @@ def cmd_markets(args: argparse.Namespace) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     kept = skipped = 0
-    no_settlement_value = 0
+    no_settlement_value = zero_volume = 0
     with httpx.Client(timeout=30.0, headers=_auth_headers_if_available()) as client, out_path.open("w") as handle:
         for series_ticker in args.series_ticker:
             _log(f"Fetching settled markets for {series_ticker}...")
-            for raw in iter_settled_markets(client, args.base_url, series_ticker, min_ts, max_ts):
+            for raw in iter_settled_markets(
+                client, args.base_url, series_ticker, min_ts, max_ts, status=args.status
+            ):
                 record = convert_market(raw, prefix_map)
                 if record is None:
                     skipped += 1
                     continue
                 if "settlement_value" not in record:
                     no_settlement_value += 1
+                if record.get("volume", 0.0) == 0.0:
+                    zero_volume += 1
                 handle.write(json.dumps(record) + "\n")
                 kept += 1
 
     _log(f"\nWrote {kept} markets to {out_path} ({skipped} skipped as unscoreable)")
     if kept == 0:
         _log("Nothing was written. Run the `inspect` command to see the raw payload shape.")
-    elif no_settlement_value:
+        return
+    if no_settlement_value:
         _log(
             f"{no_settlement_value} markets had no settlement value under any of "
             f"{SETTLEMENT_VALUE_KEYS}. False-positive rate still works without it; only the "
             f"proxy-divergence magnitude needs it."
+        )
+    if zero_volume:
+        _log(
+            f"{zero_volume}/{kept} markets ({zero_volume / kept * 100:.0f}%) never traded a single "
+            f"contract. No signal in those was executable at any price, so treat them as a ceiling "
+            f"on opportunity, not as tradeable inventory."
         )
 
 
@@ -365,6 +407,10 @@ def _parse_args() -> argparse.Namespace:
     markets.add_argument("--end", help="ISO date/datetime, inclusive")
     markets.add_argument("-o", "--output", default="data/settled.jsonl")
     markets.add_argument("--prefix-map", action="append", help="KXBTC=BTC-USD, repeatable")
+    markets.add_argument(
+        "--status", default="settled",
+        help="Kalshi status filter (default: settled, which also returns finalized markets)",
+    )
 
     series = subparsers.add_parser("series", help="Write 1 Hz index series for each settlement window")
     series.add_argument("--markets", required=True, help="JSONL produced by the `markets` command")

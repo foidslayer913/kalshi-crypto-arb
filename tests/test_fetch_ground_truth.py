@@ -24,6 +24,71 @@ def _raw(**overrides):
     return raw
 
 
+# Trimmed from a real settled market returned by Kalshi production market data. Numeric fields
+# genuinely arrive as strings, and settlement_value_dollars is the payout (0 for a "no"), which is
+# exactly the field that must NOT be mistaken for the settled index level.
+REAL_PAYLOAD = {
+    "ticker": "KXBTCD-26JUL2907-T72299.99",
+    "event_ticker": "KXBTCD-26JUL2907",
+    "market_type": "binary",
+    "status": "finalized",
+    "strike_type": "greater",
+    "floor_strike": 72299.99,
+    "close_time": "2026-07-29T11:00:00Z",
+    "expiration_value": "64398.56",
+    "settlement_value_dollars": "0.0000",
+    "settlement_timer_seconds": 60,
+    "result": "no",
+    "volume_fp": "0.00",
+    "open_interest_fp": "0.00",
+    "yes_ask_dollars": "1.0000",
+    "no_bid_dollars": "0.0000",
+}
+
+
+def test_real_kalshi_payload_converts():
+    record = convert_market(REAL_PAYLOAD, DEFAULT_PREFIX_TO_SYMBOL)
+    assert record == {
+        "ticker": "KXBTCD-26JUL2907-T72299.99",
+        "strike_type": "greater",
+        "strike_price": 72299.99,
+        "close_time": "2026-07-29T11:00:00Z",
+        "result": "no",
+        "crypto_symbol": "BTC-USD",
+        "settlement_value": 64398.56,
+        "volume": 0.0,
+        "open_interest": 0.0,
+    }
+
+
+def test_settlement_value_is_the_index_level_not_the_payout():
+    # settlement_value_dollars is 0.0000 here because the market resolved no. Picking it up would
+    # make every divergence number wrong while still looking like a plausible price.
+    record = convert_market(REAL_PAYLOAD, DEFAULT_PREFIX_TO_SYMBOL)
+    assert record["settlement_value"] == 64398.56
+    assert record["settlement_value"] != 0.0
+
+
+def test_daily_series_ticker_still_resolves_to_a_symbol():
+    # The live series is KXBTCD, not KXBTC -- prefix matching has to tolerate the suffix.
+    assert resolve_symbol("KXBTCD-26JUL2907-T72299.99", DEFAULT_PREFIX_TO_SYMBOL) == "BTC-USD"
+
+
+def test_zero_volume_market_is_recorded_as_untraded():
+    from backtest.reconstruct import SettledMarket, Variant, evaluate_window
+
+    record = convert_market(REAL_PAYLOAD, DEFAULT_PREFIX_TO_SYMBOL)
+    market = SettledMarket(
+        ticker=record["ticker"], strike_type=record["strike_type"],
+        strike_price=record["strike_price"],
+        close_time=__import__("datetime").datetime.fromisoformat("2026-07-29T11:00:00+00:00"),
+        result=record["result"], crypto_symbol=record["crypto_symbol"],
+        settlement_value=record["settlement_value"], volume=record["volume"],
+    )
+    result = evaluate_window(market, [64398.56] * 60, Variant("strict"))
+    assert result.traded is False
+
+
 def test_convert_market_greater_uses_floor_strike():
     record = convert_market(_raw(), DEFAULT_PREFIX_TO_SYMBOL)
     assert record["strike_price"] == 118000.0
