@@ -26,6 +26,7 @@ from ingestion.kalshi_auth import auth_headers, load_private_key
 DEMO_BASE_URL = "https://external-api.demo.kalshi.co"
 LIVE_BASE_URL = "https://api.elections.kalshi.com"
 MARKETS_PATH = "/trade-api/v2/markets"
+ORDERBOOK_PATH_TEMPLATE = "/trade-api/v2/markets/{ticker}/orderbook"
 
 
 def _load_credentials() -> tuple[str, object]:
@@ -68,6 +69,36 @@ def list_markets(
     return markets
 
 
+def fetch_orderbook(base_url: str, api_key_id: str, private_key: object, ticker: str) -> dict:
+    """Fetch a single market's resting order book. This is where quote/depth actually lives — the
+    markets list endpoint doesn't carry it. Answers whether there's anything to trade against."""
+    path = ORDERBOOK_PATH_TEMPLATE.format(ticker=ticker)
+    with httpx.Client(base_url=base_url, timeout=15.0) as client:
+        headers = auth_headers(private_key, api_key_id, "GET", path)
+        response = client.get(path, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+
+def _print_orderbook(ticker: str, payload: dict) -> None:
+    book = payload.get("orderbook", payload)
+    yes = book.get("yes") or []
+    no = book.get("no") or []
+    print(f"Order book for {ticker}:")
+    print(f"  yes side (bids, [price_cents, contracts]): {yes if yes else 'EMPTY'}")
+    print(f"  no  side (bids, [price_cents, contracts]): {no if no else 'EMPTY'}")
+    if not yes and not no:
+        print("\n  Both sides empty — no resting liquidity to trade against here.")
+    else:
+        # Implied YES ask = 100 - best NO bid; implied NO ask = 100 - best YES bid.
+        best_yes_bid = max((level[0] for level in yes), default=None)
+        best_no_bid = max((level[0] for level in no), default=None)
+        if best_no_bid is not None:
+            print(f"\n  implied YES ask = 100 - {best_no_bid} = {100 - best_no_bid}c")
+        if best_yes_bid is not None:
+            print(f"  implied NO  ask = 100 - {best_yes_bid} = {100 - best_yes_bid}c")
+
+
 def _print_table(markets: list[dict]) -> None:
     if not markets:
         print("No markets returned.")
@@ -101,10 +132,22 @@ def main() -> None:
         help="Which Kalshi environment's market data to read. 'live' is READ-ONLY here — no orders.",
     )
     parser.add_argument("--base-url", default=None, help="Override the base URL entirely.")
+    parser.add_argument(
+        "--orderbook",
+        default=None,
+        metavar="TICKER",
+        help="Instead of listing, fetch one market's resting order book (real depth lives here).",
+    )
     args = parser.parse_args()
 
     base_url = args.base_url or (LIVE_BASE_URL if args.env == "live" else DEMO_BASE_URL)
     api_key_id, private_key = _load_credentials()
+
+    if args.orderbook:
+        print(f"Reading order book for {args.orderbook} from {base_url}\n")
+        payload = fetch_orderbook(base_url, api_key_id, private_key, args.orderbook)
+        _print_orderbook(args.orderbook, payload)
+        return
 
     print(f"Reading {args.status} markets for series {args.series_ticker} from {base_url}\n")
     markets = list_markets(base_url, api_key_id, private_key, args.series_ticker, args.status, args.limit)
