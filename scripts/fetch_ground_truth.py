@@ -66,18 +66,61 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _get(client: httpx.Client, url: str, params: dict[str, Any], attempts: int = 5) -> dict | list:
-    """GET with backoff on rate limits and transient failures. The only verb this script uses."""
-    delay = 1.0
+_last_request_at = 0.0
+
+
+def _throttle(min_interval: float) -> None:
+    """Space requests out. Staying under the limit beats backing off after hitting it."""
+    global _last_request_at
+    elapsed = time.monotonic() - _last_request_at
+    if elapsed < min_interval:
+        time.sleep(min_interval - elapsed)
+    _last_request_at = time.monotonic()
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    header = response.headers.get("retry-after")
+    if not header:
+        return None
+    try:
+        return float(header)
+    except ValueError:
+        return None
+
+
+def _get(
+    client: httpx.Client, url: str, params: dict[str, Any],
+    *, min_interval: float = 0.5, attempts: int = 6,
+) -> dict | list:
+    """GET with throttling and backoff. The only verb this script uses.
+
+    429 gets a much longer backoff than a transient 5xx: a rate limit means "you are asking too
+    often", and retrying a second later just re-triggers it. Honours Retry-After when sent.
+    """
+    rate_limit_delay = 5.0
+    transient_delay = 1.0
     for attempt in range(1, attempts + 1):
+        _throttle(min_interval)
         response = client.get(url, params=params)
-        if response.status_code in (429, 500, 502, 503, 504):
+
+        if response.status_code == 429:
             if attempt == attempts:
                 response.raise_for_status()
-            _log(f"  {response.status_code} from {url}; retrying in {delay:.0f}s")
-            time.sleep(delay)
-            delay *= 2
+            wait = _retry_after_seconds(response) or rate_limit_delay
+            _log(f"  rate limited (attempt {attempt}/{attempts}); waiting {wait:.0f}s")
+            time.sleep(wait)
+            rate_limit_delay = min(rate_limit_delay * 2, 60.0)
             continue
+
+        if response.status_code in (500, 502, 503, 504):
+            if attempt == attempts:
+                response.raise_for_status()
+            _log(f"  HTTP {response.status_code} (attempt {attempt}/{attempts}); "
+                 f"retrying in {transient_delay:.0f}s")
+            time.sleep(transient_delay)
+            transient_delay = min(transient_delay * 2, 30.0)
+            continue
+
         response.raise_for_status()
         return response.json()
     raise RuntimeError("unreachable")
@@ -88,16 +131,22 @@ def _get(client: httpx.Client, url: str, params: dict[str, Any], attempts: int =
 
 def iter_settled_markets(
     client: httpx.Client, base_url: str, series_ticker: str,
-    min_close_ts: int | None, max_close_ts: int | None, page_size: int = 200,
-    status: str = "settled",
+    min_close_ts: int | None, max_close_ts: int | None, page_size: int = 1000,
+    status: str = "settled", min_interval: float = 0.5,
 ) -> Iterator[dict]:
     """Page through settled markets for one series.
 
     Note the returned objects carry `status: "finalized"` even when queried with
     `status=settled` — Kalshi treats the filter as covering both. `--status` exists so that can be
     changed without a code edit if the counts ever look wrong.
+
+    Pages are requested as large as the API allows, because the binding constraint here is
+    requests-per-second, not bytes. A cursor that repeats is treated as the end of the data rather
+    than followed, so a non-advancing cursor cannot spin this into an endless request loop.
     """
     cursor: str | None = None
+    seen_cursors: set[str] = set()
+    page = 0
     while True:
         params: dict[str, Any] = {"series_ticker": series_ticker, "status": status, "limit": page_size}
         if min_close_ts is not None:
@@ -106,12 +155,19 @@ def iter_settled_markets(
             params["max_close_ts"] = max_close_ts
         if cursor:
             params["cursor"] = cursor
-        payload = _get(client, f"{base_url}/markets", params)
+        payload = _get(client, f"{base_url}/markets", params, min_interval=min_interval)
         markets = payload.get("markets", []) if isinstance(payload, dict) else []
+        page += 1
+        _log(f"  page {page}: {len(markets)} markets")
         yield from markets
+
         cursor = payload.get("cursor") if isinstance(payload, dict) else None
         if not cursor or not markets:
             return
+        if cursor in seen_cursors:
+            _log("  cursor stopped advancing; treating this as the end of the data")
+            return
+        seen_cursors.add(cursor)
 
 
 def resolve_symbol(ticker: str, prefix_map: dict[str, str]) -> str | None:
@@ -200,7 +256,8 @@ def cmd_markets(args: argparse.Namespace) -> None:
         for series_ticker in args.series_ticker:
             _log(f"Fetching settled markets for {series_ticker}...")
             for raw in iter_settled_markets(
-                client, args.base_url, series_ticker, min_ts, max_ts, status=args.status
+                client, args.base_url, series_ticker, min_ts, max_ts,
+                page_size=args.page_size, status=args.status, min_interval=args.rate_limit,
             ):
                 record = convert_market(raw, prefix_map)
                 if record is None:
@@ -273,7 +330,7 @@ def bucket_trades_to_seconds(trades: list[tuple[int, float]]) -> dict[int, float
 
 
 def fetch_agg_trades(
-    client: httpx.Client, symbol: str, start_ms: int, end_ms: int, pause: float = 0.12,
+    client: httpx.Client, symbol: str, start_ms: int, end_ms: int, min_interval: float = 0.12,
 ) -> list[tuple[int, float]]:
     """Fetch Binance aggregate trades in [start_ms, end_ms], paging past the 1000-row cap."""
     trades: list[tuple[int, float]] = []
@@ -282,6 +339,7 @@ def fetch_agg_trades(
         payload = _get(
             client, f"{BINANCE_DATA_API}/api/v3/aggTrades",
             {"symbol": symbol, "startTime": cursor, "endTime": end_ms, "limit": 1000},
+            min_interval=min_interval,
         )
         if not isinstance(payload, list) or not payload:
             break
@@ -291,7 +349,6 @@ def fetch_agg_trades(
         if len(payload) < 1000 or last <= cursor:
             break
         cursor = last + 1
-        time.sleep(pause)
     return trades
 
 
@@ -324,7 +381,9 @@ def cmd_series(args: argparse.Namespace) -> None:
                 start_ms = (close_ts - args.pad_seconds) * 1000
                 end_ms = close_ts * 1000
                 try:
-                    trades = fetch_agg_trades(client, binance_symbol, start_ms, end_ms)
+                    trades = fetch_agg_trades(
+                        client, binance_symbol, start_ms, end_ms, min_interval=args.rate_limit
+                    )
                 except httpx.HTTPError as error:
                     _log(f"  window {index}/{len(ordered)} failed: {error}")
                     continue
@@ -416,12 +475,24 @@ def _parse_args() -> argparse.Namespace:
         "--status", default="settled",
         help="Kalshi status filter (default: settled, which also returns finalized markets)",
     )
+    markets.add_argument(
+        "--page-size", type=int, default=1000,
+        help="Markets per request (default: 1000). Bigger pages mean fewer requests.",
+    )
+    markets.add_argument(
+        "--rate-limit", type=float, default=0.5,
+        help="Minimum seconds between requests (default: 0.5). Raise this if you keep hitting 429.",
+    )
 
     series = subparsers.add_parser("series", help="Write 1 Hz index series for each settlement window")
     series.add_argument("--markets", required=True, help="JSONL produced by the `markets` command")
     series.add_argument("--out-dir", default="data")
     series.add_argument("--pad-seconds", type=int, default=120)
     series.add_argument("--binance-map", action="append", help="BTC-USD=BTCUSDT, repeatable")
+    series.add_argument(
+        "--rate-limit", type=float, default=0.12,
+        help="Minimum seconds between requests (default: 0.12). Raise this if you hit 429.",
+    )
 
     return parser.parse_args()
 
