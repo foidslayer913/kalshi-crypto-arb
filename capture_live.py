@@ -69,10 +69,22 @@ class CaptureConfig:
 
 def _load_config(base_url: str, ws_url: str) -> CaptureConfig:
     load_dotenv()
-    api_key_id = os.getenv("KALSHI_API_KEY_ID")
-    key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+    # Live and Demo are separate environments with separate API keys: a Demo key gets a 401 on the
+    # Live WebSocket. Prefer dedicated KALSHI_LIVE_* vars so Demo creds (used by main.py) and Live
+    # creds (used here, read-only) can coexist in one .env; fall back to the standard names.
+    api_key_id = os.getenv("KALSHI_LIVE_API_KEY_ID") or os.getenv("KALSHI_API_KEY_ID")
+    key_path = os.getenv("KALSHI_LIVE_PRIVATE_KEY_PATH") or os.getenv("KALSHI_PRIVATE_KEY_PATH")
     if not api_key_id or not key_path:
-        raise SystemExit("KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH must be set in .env")
+        raise SystemExit(
+            "Set KALSHI_LIVE_API_KEY_ID and KALSHI_LIVE_PRIVATE_KEY_PATH in .env (a key generated "
+            "on your LIVE Kalshi account — a Demo key will 401 against Live)."
+        )
+    using_live_vars = bool(os.getenv("KALSHI_LIVE_API_KEY_ID"))
+    logger.info(
+        "Using %s credentials (key id ...%s)",
+        "KALSHI_LIVE_*" if using_live_vars else "KALSHI_* (fallback)",
+        api_key_id[-6:],
+    )
     symbols_raw = os.getenv("CRYPTO_FEED_SYMBOLS", "BTC-USD,ETH-USD")
     symbols = [symbol.strip() for symbol in symbols_raw.split(",") if symbol.strip()]
     return CaptureConfig(
