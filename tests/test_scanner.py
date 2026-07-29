@@ -39,6 +39,17 @@ def demo_trader(tmp_path) -> DemoTrader:
     return DemoTrader(settings, kill_switch=KillSwitch(max_daily_loss=100.0))
 
 
+def _snapshot(yes=(), no=()):
+    # Live wire shape: dollar-string prices, fixed-point-string sizes.
+    def levels(pairs):
+        return [[f"{price / 100:.4f}", f"{qty:.2f}"] for price, qty in pairs]
+
+    return {
+        "type": "orderbook_snapshot",
+        "msg": {"market_ticker": "KXBTC-TEST", "yes_dollars_fp": levels(yes), "no_dollars_fp": levels(no)},
+    }
+
+
 def _make_scanner(demo_trader, tmp_path, strike_type="greater", strike_price=50.0):
     market = MarketInfo(
         ticker="KXBTC-TEST", strike_type=strike_type, strike_price=strike_price,
@@ -75,7 +86,7 @@ def test_maybe_trade_fires_when_guaranteed_and_yield_sufficient(demo_trader, tmp
         scanner._window.record_tick(100.0)  # floor average = 100 >> strike 50
     # no bid at 5 cents -> yes ask = 100 - 5 = 95 cents; fee $0.01 -> net yield 0.04 >= 0.01
     order_book.apply(
-        {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [], "no": [[5, 50]]}}
+        _snapshot(no=[[5, 50]])
     )
     asyncio.run(scanner._maybe_trade())
     assert scanner._executed is True
@@ -87,7 +98,7 @@ def test_maybe_trade_does_nothing_when_not_guaranteed(demo_trader, tmp_path):
     for _ in range(30):
         scanner._window.record_tick(100.0)  # floor average well below strike 1000
     order_book.apply(
-        {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [], "no": [[5, 50]]}}
+        _snapshot(no=[[5, 50]])
     )
     asyncio.run(scanner._maybe_trade())
     assert scanner._executed is False
@@ -109,7 +120,7 @@ def test_maybe_trade_skips_when_yield_too_low(demo_trader, tmp_path):
         scanner._window.record_tick(100.0)
     # no bid at 1 cent -> yes ask = 0.99; fee $0.01 -> net yield 0.00 < default 0.01 threshold
     order_book.apply(
-        {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [], "no": [[1, 50]]}}
+        _snapshot(no=[[1, 50]])
     )
     asyncio.run(scanner._maybe_trade())
     assert scanner._executed is False
@@ -121,7 +132,7 @@ def test_maybe_trade_never_fires_twice(demo_trader, tmp_path):
     for _ in range(60):
         scanner._window.record_tick(100.0)
     order_book.apply(
-        {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [], "no": [[5, 50]]}}
+        _snapshot(no=[[5, 50]])
     )
     asyncio.run(scanner._maybe_trade())
     asyncio.run(scanner._maybe_trade())
@@ -137,7 +148,7 @@ def test_less_strike_type_trades_on_yes_side(demo_trader, tmp_path):
         scanner._window.record_tick(0.0)  # ceiling average = 0 << strike 200
     # no bid at 5 cents -> yes ask = 100 - 5 = 95 cents; fee $0.01 -> net yield 0.04 >= 0.01
     order_book.apply(
-        {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [], "no": [[5, 50]]}}
+        _snapshot(no=[[5, 50]])
     )
     asyncio.run(scanner._maybe_trade())
     assert scanner.executed is True
@@ -155,7 +166,7 @@ def test_greater_market_trades_no_side_when_guaranteed_below(demo_trader, tmp_pa
         scanner._window.record_tick(100.0)  # ceiling ~101 << strike 200
     # yes bid at 5 cents -> no ask = 95 cents
     order_book.apply(
-        {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [[5, 50]], "no": []}}
+        _snapshot(yes=[[5, 50]])
     )
     asyncio.run(scanner._maybe_trade())
     assert scanner.executed is True
