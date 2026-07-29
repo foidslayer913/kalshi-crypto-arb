@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     )
     dry_run: bool = Field(default=True, alias="DRY_RUN")
     max_daily_loss: float = Field(default=100.0, alias="MAX_DAILY_LOSS")
+    capture_dir: str = Field(default="captures", alias="CAPTURE_DIR")
 
     @field_validator("kalshi_base_url", "kalshi_ws_url")
     @classmethod

@@ -1,6 +1,8 @@
 .env
 secrets/
 *.pem
+captures/
+telemetry.csv
 __pycache__/
 *.pyc
 .venv/

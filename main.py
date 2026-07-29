@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
+from backtest.recorder import CaptureRecorder
 from clock import LiveClock
 from config import Settings, load_settings
 from execution.demo_trader import DemoTrader, KillSwitch
-from ingestion.crypto_feed import CryptoIndexFeed
+from ingestion.crypto_feed import CryptoIndexFeed, PriceTick
 from ingestion.kalshi_rest import KalshiRestClient
 from ingestion.kalshi_ws import KalshiWebSocketClient
 from ingestion.order_book import OrderBookStore
@@ -24,6 +26,7 @@ async def _build_scanners(
     order_book: OrderBookStore,
     trader: DemoTrader,
     telemetry: TelemetryLogger,
+    recorder: CaptureRecorder | None,
 ) -> list[SettlementArbScanner]:
     scanners = []
     for ticker in settings.market_tickers:
@@ -32,6 +35,10 @@ async def _build_scanners(
             logger.warning("No crypto symbol mapping for market %s; skipping", ticker)
             continue
         market = await rest_client.get_market(ticker)
+        if recorder is not None:
+            # Strike and close time come from a REST call that replay will not repeat, so they
+            # have to live in the capture or the recording is not self-contained.
+            recorder.record_market(market)
         scanners.append(
             SettlementArbScanner(
                 market, crypto_symbol,
@@ -44,21 +51,40 @@ async def _build_scanners(
 
 async def main() -> None:
     settings = load_settings()
+    recorder = CaptureRecorder(settings.capture_dir) if settings.capture_dir else None
     order_book = OrderBookStore()
-    ws_client = KalshiWebSocketClient(settings, on_message=order_book.apply)
-    crypto_feed = CryptoIndexFeed(settings.crypto_feed_symbols)
+
+    def on_ws_message(message: dict[str, Any]) -> None:
+        # Record before parsing: the capture should reflect what actually arrived even if the
+        # order book parsing rejects it.
+        if recorder is not None:
+            recorder.record_ws(message)
+        order_book.apply(message)
+
+    def on_price_tick(tick: PriceTick) -> None:
+        if recorder is not None:
+            recorder.record_tick(tick)
+
+    ws_client = KalshiWebSocketClient(settings, on_message=on_ws_message)
+    crypto_feed = CryptoIndexFeed(settings.crypto_feed_symbols, on_tick=on_price_tick)
     rest_client = KalshiRestClient(settings)
     kill_switch = KillSwitch(max_daily_loss=settings.max_daily_loss)
     trader = DemoTrader(settings, kill_switch=kill_switch, dry_run=settings.dry_run)
     telemetry = TelemetryLogger()
 
-    scanners = await _build_scanners(settings, rest_client, crypto_feed, order_book, trader, telemetry)
-
-    await asyncio.gather(
-        ws_client.run_forever(),
-        crypto_feed.run_forever(),
-        *(scanner.run() for scanner in scanners),
+    scanners = await _build_scanners(
+        settings, rest_client, crypto_feed, order_book, trader, telemetry, recorder
     )
+
+    tasks = [ws_client.run_forever(), crypto_feed.run_forever(), *(scanner.run() for scanner in scanners)]
+    if recorder is not None:
+        tasks.append(recorder.run_forever())
+
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        if recorder is not None:
+            recorder.close()
 
 
 if __name__ == "__main__":

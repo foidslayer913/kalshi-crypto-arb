@@ -16,7 +16,10 @@ pytest                                   # run all tests
 pytest tests/test_math.py::test_name     # run a single test
 
 # Tier 2 backtest: score settlement signals against how markets actually settled
-python -m backtest --markets settled.jsonl --series BTC-USD=btc_1s.csv
+python -m backtest signal --markets settled.jsonl --series BTC-USD=btc_1s.csv
+
+# Tier 1: inspect what the live capture has collected so far
+python -m backtest capture --dir captures
 ```
 
 There is no linter configured yet.
@@ -52,7 +55,16 @@ Data flows one direction through four stages:
 3. **Execution** (`execution/`, implemented) — `demo_trader.py`'s `DemoTrader` signs REST requests using `ingestion/kalshi_auth.py` and places limit orders against the Kalshi Demo sandbox only (it raises at construction time if `settings.kalshi_base_url` isn't a demo URL, on top of the `config.py` guardrail). In dry-run mode (the default, `DRY_RUN=true`) it never touches the network: `simulate_fill()` compares a `BookQuote` from decision time against one from order time to detect phantom fills — book movement between signal and order arrival. `KillSwitch` (constructed with `MAX_DAILY_LOSS`) tracks realized simulated losses and makes every `place_order()` call raise `KillSwitchTripped` once the daily loss limit is reached; it does not auto-reset, so a new trading day means constructing a new one (or calling `.reset()`).
 4. **Telemetry** (`telemetry/`, implemented) — `logger.py`'s `TelemetryLogger` appends `ExecutionRecord`s (tick-to-order latency, phantom fill flag, simulated P&L) to a CSV file and exposes `summary()` for aggregate phantom-fill-rate/latency/P&L stats.
 
-5. **Backtest** (`backtest/`, Tier 2 implemented) — `reconstruct.py` replays each expired market's final 60 seconds from a historical 1s index series (`PriceSeries`), runs it through the *same* `guaranteed_side()` the live scanner uses, and scores the signal against the market's actual settlement. Its headline metrics are `actionable_rate` (signals with time left to trade — note a bound that only closes at second 60 restates the settled result and is deliberately excluded) and `false_positive_rate` (acted-on signals where the market settled the other way, i.e. proxy-index divergence). Run via `python -m backtest`. Tiers 1 and 3 (`recorder.py`, `replay.py`, `fill_model.py`, `report.py`) are not built yet — they need recorded L2 depth, which is not in Kalshi's public historical record.
+5. **Backtest** (`backtest/`) — `reconstruct.py` (Tier 2) replays each expired market's final 60 seconds from a historical 1s index series (`PriceSeries`), runs it through the *same* `guaranteed_side()` the live scanner uses, and scores the signal against the market's actual settlement. Its headline metrics are `actionable_rate` (signals with time left to trade — note a bound that only closes at second 60 restates the settled result and is deliberately excluded) and `false_positive_rate` (acted-on signals where the market settled the other way, i.e. proxy-index divergence). `recorder.py` (Tier 1) tees live data to per-UTC-day JSONL so replay backtests become possible at all; see the capture format note below. `replay.py`, `fill_model.py`, and `report.py` are still unbuilt.
+
+#### Capture format invariants (`backtest/recorder.py`)
+
+Two properties of the on-disk format are load-bearing and must not be relaxed:
+
+- **`t` is arrival time, not venue time.** It is when the process observed the event, so it is the earliest moment the bot could have acted on it. Index ticks also carry `ts` (when the price was sampled) — that field is data, never the pacing key. Pacing a replay off venue timestamps would hand the strategy information before it actually had it, which is the precise look-ahead bias the capture exists to rule out.
+- **One merged, append-ordered stream.** Order book messages and index ticks interleave on disk exactly as they did live, so a replay driver walks one file forward instead of reconciling two sources.
+
+WebSocket payloads are stored **unparsed**. The schema in `order_book.py` is written against Kalshi's documented shape and has never been checked against a live feed, so captures must stay replayable after that parsing is corrected. `record_*` only builds a dict and appends it; serialisation and disk I/O happen in `run_forever()`'s flush loop, keeping I/O off the latency path being measured. Market metadata is recorded too (`record_market`) because strike and close time come from a REST call replay will not repeat — without it a capture is not self-contained.
 
 `clock.py` supplies the `Clock` protocol (`now()` / `async sleep()`) that lets scanner logic run identically live and simulated. `LiveClock` is the production default; `VirtualClock` advances instantly so a 60-second window replays in microseconds, in either a self-driving mode (`autoadvance=True`, for tests) or an externally-paced mode (`autoadvance=False` plus `await advance_to(t)`, which is what a replay harness needs so recorded events set the pace). A bare `asyncio.sleep(0)` used to yield to the event loop is a scheduling hop, not simulated time, and deliberately does not go through the clock.
 
@@ -71,4 +83,6 @@ All three phases are implemented end-to-end, plus the Tier 2 backtest. Two open 
 1. **Run the Tier 2 backtest on real data.** It needs a JSONL of settled crypto markets (ticker, strike_type, strike_price, close_time, result, crypto_symbol, settlement_value) and a 1 Hz index series per symbol. Until it runs against a real proxy feed the false-positive rate is unmeasured, and that number is what decides whether any relaxed variant is safe to trade. A synthetic run reports FP=0 only because the signal and the settlement value come from the same series — zero divergence by construction, not a result.
 2. **Verify the wire schemas.** There's no live Kalshi Demo account in this environment, so `kalshi_ws.py`, `kalshi_rest.py`, and `order_book.py` have never been exercised against a real connection. Run `main.py` against a real Demo account and fix any mismatch between the assumed WebSocket/REST message shapes and Kalshi's actual ones.
 
-Tiers 1 and 3 of the backtest (`recorder.py` → JSONL capture of live WS + index ticks, `replay.py` driving `VirtualClock(autoadvance=False)`, `fill_model.py` with optimistic/latency-shifted/queue-adversarial fills, `report.py`) are designed but not built. They depend on recorded L2 depth, which has to be captured live — Kalshi does not publish historical order books, so the `(fire_second, best_ask)` joint distribution and any fill-rate or P&L-vs-latency number is unavailable until a capture exists.
+3. **Keep the capture running.** `backtest/recorder.py` is wired into `main.py` and writes to `CAPTURE_DIR` (default `captures/`, empty disables). Every day it is not running is a day of unrecoverable data — Kalshi publishes no historical order books, so the `(fire_second, best_ask)` joint distribution, fill rates, and the P&L-vs-latency curve are all unavailable until a capture exists. Budget roughly 150 bytes/event; at ~1M events/day that is ~150 MB/day uncompressed, so plan on gzipping rotated day files.
+
+Still unbuilt: `replay.py` (drives `VirtualClock(autoadvance=False)` from a capture, feeding `OrderBookStore` and `CryptoIndexFeed` in arrival order), `fill_model.py` (optimistic / latency-shifted / queue-adversarial), and `report.py`. All three are blocked on having a real capture to run against, not on design.
