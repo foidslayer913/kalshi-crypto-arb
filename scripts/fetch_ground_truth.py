@@ -187,8 +187,9 @@ def _first_number(raw: dict, keys: tuple[str, ...]) -> float | None:
 
 def cmd_markets(args: argparse.Namespace) -> None:
     prefix_map = _parse_mapping(args.prefix_map, DEFAULT_PREFIX_TO_SYMBOL)
-    min_ts = _to_unix(args.start) if args.start else None
-    max_ts = _to_unix(args.end) if args.end else None
+    # Kalshi parses these as int64; a float renders as "1785283200.0" and is rejected outright.
+    min_ts = int(_to_unix(args.start)) if args.start else None
+    max_ts = int(_to_unix(args.end)) if args.end else None
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -403,8 +404,12 @@ def _parse_args() -> argparse.Namespace:
 
     markets = subparsers.add_parser("markets", help="Write settled markets as JSONL")
     markets.add_argument("--series-ticker", required=True, action="append")
-    markets.add_argument("--start", help="ISO date/datetime, inclusive")
-    markets.add_argument("--end", help="ISO date/datetime, inclusive")
+    markets.add_argument("--start", help="ISO date/datetime (UTC)")
+    markets.add_argument(
+        "--end",
+        help="ISO date/datetime (UTC). A bare date means midnight, so pass the following day to "
+             "include a full final day of markets.",
+    )
     markets.add_argument("-o", "--output", default="data/settled.jsonl")
     markets.add_argument("--prefix-map", action="append", help="KXBTC=BTC-USD, repeatable")
     markets.add_argument(
@@ -433,9 +438,11 @@ def main() -> None:
     except httpx.HTTPStatusError as error:
         raise SystemExit(
             f"\n{error.request.url.host} returned HTTP {error.response.status_code}.\n"
+            f"  400     -> a parameter was rejected; the body below names which one\n"
             f"  403/401 -> this endpoint may need signed requests; set KALSHI_API_KEY_ID and\n"
             f"             KALSHI_PRIVATE_KEY_PATH, and run via `python -m scripts.fetch_ground_truth`\n"
             f"  404     -> check --base-url and the series ticker\n"
+            f"Request: {error.request.url}\n"
             f"Body: {error.response.text[:300]}"
         ) from error
     except httpx.HTTPError as error:

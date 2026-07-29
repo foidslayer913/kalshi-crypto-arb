@@ -191,6 +191,15 @@ def test_to_unix_accepts_dates_and_zulu_timestamps():
     assert _to_unix("2026-07-29") == _to_unix("2026-07-29T00:00:00Z")
 
 
+def test_close_ts_bounds_must_be_integers_for_the_api():
+    # Kalshi parses min/max_close_ts as int64 and rejects "1785283200.0" outright, so the float
+    # datetime.timestamp() hands back has to be truncated before it reaches the query string.
+    value = _to_unix("2026-07-29")
+    assert isinstance(value, float)
+    assert str(int(value)).isdigit()
+    assert "." not in str(int(value))
+
+
 def test_parse_mapping_defaults_and_overrides():
     assert _parse_mapping(None, DEFAULT_PREFIX_TO_SYMBOL) == DEFAULT_PREFIX_TO_SYMBOL
     assert _parse_mapping(["KXSOL=SOL-USD"], DEFAULT_PREFIX_TO_SYMBOL) == {"KXSOL": "SOL-USD"}
