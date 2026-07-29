@@ -79,6 +79,14 @@ def test_reset_clears_recorded_ticks():
     assert window.guaranteed_floor_average() == 0.0
 
 
+def test_guaranteed_ceiling_average_at_full_window_with_default_infinite_cap():
+    # Regression: 0 * inf must not turn into nan once the window is full and price_cap is
+    # left at its default (unset caps are only meaningful while ticks remain).
+    window = _window_with_ticks(60, price=0.0)
+    assert window.guaranteed_ceiling_average() == pytest.approx(0.0)
+    assert window.is_guaranteed_below(1.0) is True
+
+
 def test_guaranteed_ceiling_and_is_guaranteed_below():
     window = SettlementWindow(price_cap=1.0)
     for _ in range(59):

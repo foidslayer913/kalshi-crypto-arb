@@ -46,8 +46,15 @@ class SettlementWindow:
         return (self.cumulative_sum + remaining * self.price_floor) / self.window_size
 
     def guaranteed_ceiling_average(self) -> float:
-        """Guaranteed Ceiling Average_k = (S_k + (60 - k) * P_cap) / 60."""
+        """Guaranteed Ceiling Average_k = (S_k + (60 - k) * P_cap) / 60.
+
+        Once the window is full (remaining == 0), the cap contributes nothing regardless of its
+        value — this is handled explicitly so the default `price_cap = inf` doesn't turn `0 * inf`
+        into `nan`.
+        """
         remaining = self.window_size - self.ticks_recorded
+        if remaining == 0:
+            return self.cumulative_sum / self.window_size
         return (self.cumulative_sum + remaining * self.price_cap) / self.window_size
 
     def is_guaranteed_above(self, strike_price: float) -> bool:

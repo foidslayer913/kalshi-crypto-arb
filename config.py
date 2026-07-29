@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     )
     market_tickers_raw: str = Field(default="", alias="MARKET_TICKERS")
     crypto_feed_symbols_raw: str = Field(default="BTC-USD,ETH-USD", alias="CRYPTO_FEED_SYMBOLS")
+    market_crypto_symbols_raw: str = Field(
+        default="KXBTC:BTC-USD,KXETH:ETH-USD", alias="MARKET_CRYPTO_SYMBOLS"
+    )
     dry_run: bool = Field(default=True, alias="DRY_RUN")
     max_daily_loss: float = Field(default=100.0, alias="MAX_DAILY_LOSS")
 
@@ -45,6 +48,18 @@ class Settings(BaseSettings):
     @property
     def crypto_feed_symbols(self) -> list[str]:
         return [symbol.strip() for symbol in self.crypto_feed_symbols_raw.split(",") if symbol.strip()]
+
+    @property
+    def market_crypto_symbols(self) -> dict[str, str]:
+        """Maps a market ticker prefix (e.g. 'KXBTC') to the crypto feed symbol that settles it."""
+        mapping: dict[str, str] = {}
+        for pair in self.market_crypto_symbols_raw.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            prefix, _, symbol = pair.partition(":")
+            mapping[prefix.strip()] = symbol.strip()
+        return mapping
 
     @property
     def private_key_pem(self) -> bytes:
