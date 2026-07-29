@@ -377,12 +377,30 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    if args.command == "inspect":
-        cmd_inspect(args)
-    elif args.command == "markets":
-        cmd_markets(args)
-    else:
-        cmd_series(args)
+    try:
+        if args.command == "inspect":
+            cmd_inspect(args)
+        elif args.command == "markets":
+            cmd_markets(args)
+        else:
+            cmd_series(args)
+    except httpx.HTTPStatusError as error:
+        raise SystemExit(
+            f"\n{error.request.url.host} returned HTTP {error.response.status_code}.\n"
+            f"  403/401 -> this endpoint may need signed requests; set KALSHI_API_KEY_ID and\n"
+            f"             KALSHI_PRIVATE_KEY_PATH, and run via `python -m scripts.fetch_ground_truth`\n"
+            f"  404     -> check --base-url and the series ticker\n"
+            f"Body: {error.response.text[:300]}"
+        ) from error
+    except httpx.HTTPError as error:
+        raise SystemExit(
+            f"\nCould not reach {getattr(getattr(error, 'request', None), 'url', 'the API')}: {error}\n"
+            f"This script needs direct outbound HTTPS. If you are behind a corporate proxy or a\n"
+            f"restricted network, run it somewhere with open egress -- a sandbox that blocks\n"
+            f"api.elections.kalshi.com or data-api.binance.vision cannot produce these files."
+        ) from error
+    except KeyboardInterrupt:
+        raise SystemExit("\nInterrupted.") from None
 
 
 if __name__ == "__main__":
