@@ -6,11 +6,13 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from clock import VirtualClock
 from config import Settings
 from execution.demo_trader import DemoTrader, KillSwitch
 from ingestion.crypto_feed import CryptoIndexFeed, PriceTick
 from ingestion.kalshi_rest import MarketInfo
 from ingestion.order_book import OrderBookStore
+from strategy.math_engine import relative_cap
 from strategy.scanner import ScannerConfig, SettlementArbScanner, resolve_crypto_symbol
 from telemetry.logger import TelemetryLogger
 
@@ -126,16 +128,57 @@ def test_maybe_trade_never_fires_twice(demo_trader, tmp_path):
     assert telemetry.summary()["count"] == 1
 
 
-def test_less_strike_type_trades_on_no_side(demo_trader, tmp_path):
+def test_less_strike_type_trades_on_yes_side(demo_trader, tmp_path):
+    # A "less" market's YES pays out below the cap, so a ceiling under the strike means YES wins.
     scanner, _, order_book, telemetry = _make_scanner(
         demo_trader, tmp_path, strike_type="less", strike_price=200.0
     )
     for _ in range(60):
         scanner._window.record_tick(0.0)  # ceiling average = 0 << strike 200
-    # yes bid at 5 cents -> no ask = 100 - 5 = 95 cents; fee $0.01 -> net yield 0.04 >= 0.01
+    # no bid at 5 cents -> yes ask = 100 - 5 = 95 cents; fee $0.01 -> net yield 0.04 >= 0.01
+    order_book.apply(
+        {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [], "no": [[5, 50]]}}
+    )
+    asyncio.run(scanner._maybe_trade())
+    assert scanner.executed is True
+    assert telemetry.summary()["count"] == 1
+
+
+def test_greater_market_trades_no_side_when_guaranteed_below(demo_trader, tmp_path):
+    # The symmetric opportunity: a ceiling below the strike decides a "greater" market against
+    # YES, so NO is the guaranteed side.
+    scanner, _, order_book, telemetry = _make_scanner(
+        demo_trader, tmp_path, strike_type="greater", strike_price=200.0
+    )
+    scanner._window.cap_policy = relative_cap(0.01)
+    for _ in range(10):
+        scanner._window.record_tick(100.0)  # ceiling ~101 << strike 200
+    # yes bid at 5 cents -> no ask = 95 cents
     order_book.apply(
         {"type": "orderbook_snapshot", "msg": {"market_ticker": "KXBTC-TEST", "yes": [[5, 50]], "no": []}}
     )
     asyncio.run(scanner._maybe_trade())
-    assert scanner._executed is True
+    assert scanner.executed is True
     assert telemetry.summary()["count"] == 1
+
+
+def test_scanner_run_uses_injected_clock(demo_trader, tmp_path):
+    # A full 60-second window must replay without spending 60 real seconds.
+    clock = VirtualClock(start=datetime.now(timezone.utc).timestamp())
+    market = MarketInfo(
+        ticker="KXBTC-TEST", strike_type="greater", strike_price=50.0,
+        close_time=datetime.now(timezone.utc) + timedelta(seconds=3600),
+    )
+    crypto_feed = CryptoIndexFeed(["BTC-USD"])
+    scanner = SettlementArbScanner(
+        market, "BTC-USD", crypto_feed=crypto_feed, order_book=OrderBookStore(),
+        trader=demo_trader, telemetry=TelemetryLogger(tmp_path / "telemetry.csv"),
+        clock=clock,
+    )
+
+    started = time.monotonic()
+    asyncio.run(scanner.run())
+    real_elapsed = time.monotonic() - started
+
+    assert real_elapsed < 2.0  # an hour of waiting plus a 60s window, simulated
+    assert scanner.window.ticks_recorded == 60

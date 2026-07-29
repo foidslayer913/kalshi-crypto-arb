@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from clock import LiveClock
 from config import Settings, load_settings
 from execution.demo_trader import DemoTrader, KillSwitch
 from ingestion.crypto_feed import CryptoIndexFeed
@@ -34,7 +35,8 @@ async def _build_scanners(
         scanners.append(
             SettlementArbScanner(
                 market, crypto_symbol,
-                crypto_feed=crypto_feed, order_book=order_book, trader=trader, telemetry=telemetry,
+                crypto_feed=crypto_feed, order_book=order_book, trader=trader,
+                telemetry=telemetry, clock=LiveClock(),
             )
         )
     return scanners

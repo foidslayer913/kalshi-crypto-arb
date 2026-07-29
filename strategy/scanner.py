@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import dataclass
+from typing import Literal
 
+from clock import Clock, LiveClock
 from execution.demo_trader import BookQuote, DemoTrader
 from ingestion.crypto_feed import CryptoIndexFeed
 from ingestion.kalshi_rest import MarketInfo
@@ -14,6 +15,8 @@ from strategy.math_engine import SettlementWindow
 from telemetry.logger import ExecutionRecord, TelemetryLogger
 
 logger = logging.getLogger(__name__)
+
+Side = Literal["yes", "no"]
 
 # How stale a crypto tick can be and still count as the current second's price.
 MAX_TICK_STALENESS_SECONDS = 2.0
@@ -27,6 +30,29 @@ def resolve_crypto_symbol(ticker: str, mapping: dict[str, str]) -> str | None:
     return None
 
 
+def guaranteed_side(window: SettlementWindow, market: MarketInfo) -> Side | None:
+    """Which side of `market` the settlement bounds have already decided, if either.
+
+    A "greater" market's YES pays out when settlement exceeds the strike; a "less" market's YES
+    pays out when settlement falls below the cap. Either bound closing on the wrong side of the
+    strike decides the market, so both directions are tradeable — a floor above the strike and a
+    ceiling below it are equally conclusive, they just decide opposite sides.
+    """
+    above = window.is_guaranteed_above(market.strike_price)
+    below = window.is_guaranteed_below(market.strike_price)
+    if market.strike_type == "greater":
+        if above:
+            return "yes"
+        if below:
+            return "no"
+        return None
+    if below:
+        return "yes"
+    if above:
+        return "no"
+    return None
+
+
 @dataclass
 class ScannerConfig:
     contracts_per_trade: int = 1
@@ -35,8 +61,8 @@ class ScannerConfig:
 
 class SettlementArbScanner:
     """Watches a single market's final 60-second settlement window and fires a demo order the
-    instant the guaranteed-floor/ceiling invariant makes settlement mathematically certain and
-    the order book offers a net-positive yield after fees. Fires at most one trade per market.
+    instant the settlement bounds decide the outcome and the order book offers a net-positive
+    yield after fees. Fires at most one trade per market.
     """
 
     def __init__(
@@ -49,6 +75,8 @@ class SettlementArbScanner:
         trader: DemoTrader,
         telemetry: TelemetryLogger,
         config: ScannerConfig | None = None,
+        window: SettlementWindow | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._market = market
         self._crypto_symbol = crypto_symbol
@@ -57,8 +85,17 @@ class SettlementArbScanner:
         self._trader = trader
         self._telemetry = telemetry
         self._config = config or ScannerConfig()
-        self._window = SettlementWindow()
+        self._window = window or SettlementWindow()
+        self._clock = clock or LiveClock()
         self._executed = False
+
+    @property
+    def window(self) -> SettlementWindow:
+        return self._window
+
+    @property
+    def executed(self) -> bool:
+        return self._executed
 
     def _latest_price(self, as_of: float) -> float | None:
         buffer = self._crypto_feed.buffer(self._crypto_symbol)
@@ -69,16 +106,13 @@ class SettlementArbScanner:
             return None
         return tick.price
 
-    def _is_guaranteed(self) -> bool:
-        if self._market.strike_type == "greater":
-            return self._window.is_guaranteed_above(self._market.strike_price)
-        return self._window.is_guaranteed_below(self._market.strike_price)
-
     async def _maybe_trade(self) -> None:
-        if self._executed or not self._is_guaranteed():
+        if self._executed:
             return
-        side = "yes" if self._market.strike_type == "greater" else "no"
-        signal_time = time.time()
+        side = guaranteed_side(self._window, self._market)
+        if side is None:
+            return
+        signal_time = self._clock.now()
         ask = self._order_book.implied_ask_dollars(self._market.ticker, side)
         if ask is None:
             return
@@ -89,8 +123,8 @@ class SettlementArbScanner:
             ticker=self._market.ticker, side=side, ask_price=ask,
             ask_depth=self._order_book.ask_depth(self._market.ticker, side),
         )
-        # Yield to the event loop to give any in-flight order book updates a chance to land,
-        # mirroring the tick-to-order latency the real phantom-fill check needs to catch.
+        # Yield to the event loop so any in-flight order book updates can land. This is a
+        # scheduling hop rather than simulated time, so it does not go through the clock.
         await asyncio.sleep(0)
         current_quote = BookQuote(
             ticker=self._market.ticker, side=side,
@@ -103,7 +137,7 @@ class SettlementArbScanner:
             ticker=self._market.ticker, side=side, count=self._config.contracts_per_trade,
             price=ask, decision_quote=decision_quote, current_quote=current_quote,
         )
-        order_time = time.time()
+        order_time = self._clock.now()
         simulated_pnl = 0.0 if result.phantom_fill else (1.0 - result.price) * result.count
         self._telemetry.record(
             ExecutionRecord(
@@ -116,17 +150,17 @@ class SettlementArbScanner:
 
     async def run(self) -> None:
         """Sleep until the final 60-second settlement window opens, then sample one tick per
-        second and evaluate the invariant until either a trade fires or the window fills.
+        second and evaluate the bounds until either a trade fires or the window fills.
         """
         window_start = self._market.close_time.timestamp() - self._window.window_size
-        sleep_seconds = window_start - time.time()
+        sleep_seconds = window_start - self._clock.now()
         if sleep_seconds > 0:
-            await asyncio.sleep(sleep_seconds)
+            await self._clock.sleep(sleep_seconds)
 
         for _ in range(self._window.window_size):
             if self._executed:
                 return
-            tick_time = time.time()
+            tick_time = self._clock.now()
             self._window.record_tick(self._latest_price(tick_time))
             await self._maybe_trade()
-            await asyncio.sleep(max(0.0, tick_time + 1.0 - time.time()))
+            await self._clock.sleep(max(0.0, tick_time + 1.0 - self._clock.now()))
