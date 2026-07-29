@@ -4,7 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-This repository currently contains only `SPEC.md` — no implementation exists yet. `SPEC.md` is the authoritative technical specification and should be read in full before writing any code. There are no build, lint, or test commands yet because no source files, dependency manifest, or test suite have been created. Once Phase 1 scaffolding lands (see below), update this file with the actual commands (e.g. `pytest`, `pytest tests/test_math.py::test_name` for a single test, linter invocation, `python main.py`).
+`SPEC.md` is the authoritative technical specification and should be read in full before writing any code. Phase 1 (setup + ingestion) is implemented: `config.py` and the `ingestion/` package exist and are wired up in `main.py`. Phases 2 and 3 (`strategy/`, `execution/`, `telemetry/`) are empty packages awaiting implementation — see the roadmap below.
+
+## Commands
+
+```bash
+pip install -r requirements.txt          # install dependencies
+cp .env.example .env                     # then fill in KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH
+python main.py                           # run the ingestion orchestrator
+```
+
+There is no test suite or linter configured yet. When `tests/test_math.py` is added per the roadmap, use `pytest` (all tests) or `pytest tests/test_math.py::test_name` (a single test).
 
 ## What this project is
 
@@ -22,16 +32,16 @@ Kalshi taker fee: `Fee = ceil(0.07 * C * P * (1 - P))` where `C` = contract coun
 
 Any math engine implementation must get this invariant exactly right — it's the entire trading edge. See SPEC.md sections 1 and 3 for the full derivation and edge cases (partial data, missing ticks).
 
-## Intended architecture (per SPEC.md section 4-5)
+## Architecture (per SPEC.md section 4-5)
 
 Data flows one direction through four stages:
 
-1. **Ingestion** (`ingestion/`) — `kalshi_ws.py` streams L2 order book data over Kalshi's WebSocket; `crypto_feed.py` records the crypto index at 1-second resolution.
-2. **Strategy & math** (`strategy/`) — `math_engine.py` maintains the 60-slot rolling window and evaluates the floor-average invariant; `fee_calculator.py` applies the exact Kalshi fee formula to compute net yield per ask level.
-3. **Execution** (`execution/`) — `demo_trader.py` signs REST requests with an RSA private key (RSA-SHA256) and places limit/market orders against the Kalshi Demo sandbox only. Includes a dry-run mode that simulates fills to detect book movement before order arrival ("phantom fills").
-4. **Telemetry** (`telemetry/`) — `logger.py` records tick-to-order latency, phantom fill rate, and simulated P&L (SQLite or CSV).
+1. **Ingestion** (`ingestion/`, implemented) — `kalshi_ws.py` (`KalshiWebSocketClient`) streams L2 order book data over Kalshi's WebSocket, reconnecting automatically via `run_forever()`; `crypto_feed.py` (`CryptoIndexFeed`) polls Coinbase spot prices once per second and keeps a rolling 60-tick `deque` per symbol as a proxy for the CFB RTI averaging window. `kalshi_auth.py` implements Kalshi's RSASSA-PSS request signing (shared by the WS client now, and will be reused by `execution/demo_trader.py` later — keep signing logic there rather than duplicating it).
+2. **Strategy & math** (`strategy/`, not yet implemented) — `math_engine.py` should maintain the 60-slot rolling window and evaluate the floor-average invariant; `fee_calculator.py` should apply the exact Kalshi fee formula to compute net yield per ask level.
+3. **Execution** (`execution/`, not yet implemented) — `demo_trader.py` should sign REST requests using `ingestion/kalshi_auth.py` and place limit/market orders against the Kalshi Demo sandbox only, with a dry-run mode that simulates fills to detect book movement before order arrival ("phantom fills").
+4. **Telemetry** (`telemetry/`, not yet implemented) — `logger.py` should record tick-to-order latency, phantom fill rate, and simulated P&L (SQLite or CSV).
 
-`main.py` is the asyncio orchestrator tying these stages together; `config.py` loads settings via pydantic-settings from `.env`.
+`main.py` is the asyncio orchestrator; it currently runs the two ingestion streams concurrently via `asyncio.gather`. `config.py` loads settings via pydantic-settings from `.env`, exposing `market_tickers` / `crypto_feed_symbols` as parsed lists from comma-separated env vars, and **enforces the demo-only guardrail**: `Settings` raises a `ValueError` at load time if `KALSHI_BASE_URL` or `KALSHI_WS_URL` doesn't contain `"demo"`. Do not remove or weaken this check.
 
 ## Security and safety rules (non-negotiable)
 
@@ -41,4 +51,4 @@ Data flows one direction through four stages:
 
 ## Implementation roadmap (SPEC.md section 6)
 
-Work proceeds in three phases: (1) async setup + WebSocket ingestion, (2) math engine + fee calculator with unit tests covering partial-window evaluation (seconds 15/30/45/59), missing ticks, and fee calculations at 90¢/95¢/98¢, (3) demo execution with RSA-signed orders, dry-run phantom-fill simulation, and CSV latency/ROI reporting. Prefer implementing and testing the math engine (phase 2) thoroughly before wiring up execution, since correctness of the settlement invariant is what makes this strategy safe to run even in paper mode.
+Phase 1 (async setup + WebSocket ingestion) is done. Remaining work: (2) math engine + fee calculator with unit tests covering partial-window evaluation (seconds 15/30/45/59), missing ticks, and fee calculations at 90¢/95¢/98¢, (3) demo execution with RSA-signed orders, dry-run phantom-fill simulation, and CSV latency/ROI reporting. Prefer implementing and testing the math engine (phase 2) thoroughly before wiring up execution, since correctness of the settlement invariant is what makes this strategy safe to run even in paper mode.
