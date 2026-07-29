@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-`SPEC.md` is the authoritative technical specification and should be read in full before writing any code. Phase 1 (setup + ingestion) is implemented: `config.py` and the `ingestion/` package exist and are wired up in `main.py`. Phases 2 and 3 (`strategy/`, `execution/`, `telemetry/`) are empty packages awaiting implementation — see the roadmap below.
+`SPEC.md` is the authoritative technical specification and should be read in full before writing any code. Phase 1 (setup + ingestion) and Phase 2 (math engine + fee calculator) are implemented. Phase 3 (`execution/`, `telemetry/`) is still empty, awaiting implementation — see the roadmap below.
 
 ## Commands
 
@@ -12,9 +12,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -r requirements.txt          # install dependencies
 cp .env.example .env                     # then fill in KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH
 python main.py                           # run the ingestion orchestrator
+pytest                                   # run all tests
+pytest tests/test_math.py::test_name     # run a single test
 ```
 
-There is no test suite or linter configured yet. When `tests/test_math.py` is added per the roadmap, use `pytest` (all tests) or `pytest tests/test_math.py::test_name` (a single test).
+There is no linter configured yet.
 
 ## What this project is
 
@@ -37,7 +39,7 @@ Any math engine implementation must get this invariant exactly right — it's th
 Data flows one direction through four stages:
 
 1. **Ingestion** (`ingestion/`, implemented) — `kalshi_ws.py` (`KalshiWebSocketClient`) streams L2 order book data over Kalshi's WebSocket, reconnecting automatically via `run_forever()`; `crypto_feed.py` (`CryptoIndexFeed`) polls Coinbase spot prices once per second and keeps a rolling 60-tick `deque` per symbol as a proxy for the CFB RTI averaging window. `kalshi_auth.py` implements Kalshi's RSASSA-PSS request signing (shared by the WS client now, and will be reused by `execution/demo_trader.py` later — keep signing logic there rather than duplicating it).
-2. **Strategy & math** (`strategy/`, not yet implemented) — `math_engine.py` should maintain the 60-slot rolling window and evaluate the floor-average invariant; `fee_calculator.py` should apply the exact Kalshi fee formula to compute net yield per ask level.
+2. **Strategy & math** (`strategy/`, implemented) — `math_engine.py`'s `SettlementWindow` tracks up to 60 ticks (`None` for a missing tick) and exposes `guaranteed_floor_average()` / `is_guaranteed_above(strike)` for the core $1.00 settlement invariant, plus the symmetric `guaranteed_ceiling_average()` / `is_guaranteed_below(strike)` for the $0.00 case. Missing ticks and not-yet-arrived ticks are both excluded from `cumulative_sum`, so they're automatically treated at `price_floor` (0 for crypto) — the conservative assumption the whole invariant depends on. `fee_calculator.py`'s `calculate_fee(contracts, price)` implements Kalshi's fee rounded up to the nearest **cent** (`ceil(0.07 * C * P * (1-P) * 100) / 100`) — SPEC.md states the formula without the `* 100`/`/ 100`, but evaluated in raw dollars every nonzero fee would round up to $1, which is wrong; see the comment in `fee_calculator.py`. `calculate_net_yield()` and `meets_yield_threshold()` build on it for the `1.00 - P_ask - Fee >= Min Yield Threshold` trade trigger.
 3. **Execution** (`execution/`, not yet implemented) — `demo_trader.py` should sign REST requests using `ingestion/kalshi_auth.py` and place limit/market orders against the Kalshi Demo sandbox only, with a dry-run mode that simulates fills to detect book movement before order arrival ("phantom fills").
 4. **Telemetry** (`telemetry/`, not yet implemented) — `logger.py` should record tick-to-order latency, phantom fill rate, and simulated P&L (SQLite or CSV).
 
@@ -51,4 +53,4 @@ Data flows one direction through four stages:
 
 ## Implementation roadmap (SPEC.md section 6)
 
-Phase 1 (async setup + WebSocket ingestion) is done. Remaining work: (2) math engine + fee calculator with unit tests covering partial-window evaluation (seconds 15/30/45/59), missing ticks, and fee calculations at 90¢/95¢/98¢, (3) demo execution with RSA-signed orders, dry-run phantom-fill simulation, and CSV latency/ROI reporting. Prefer implementing and testing the math engine (phase 2) thoroughly before wiring up execution, since correctness of the settlement invariant is what makes this strategy safe to run even in paper mode.
+Phases 1 and 2 are done: ingestion, plus the math engine and fee calculator with unit tests (`tests/test_math.py`) covering partial-window evaluation (seconds 15/30/45/59), missing ticks, and fee calculations at 90¢/95¢/98¢. Remaining work: (3) demo execution with RSA-signed orders, dry-run phantom-fill simulation, and CSV latency/ROI reporting, plus a kill-switch (max daily simulated loss breaker) before execution goes live in paper mode.
