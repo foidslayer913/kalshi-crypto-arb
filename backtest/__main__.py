@@ -21,6 +21,7 @@ from backtest.reconstruct import (
     summarize,
 )
 from backtest.recorder import capture_stats, format_stats
+from backtest.window_fills import analyze_fills, format_fill_summary, summarize_fills
 
 
 def _parse_args() -> argparse.Namespace:
@@ -41,6 +42,17 @@ def _parse_args() -> argparse.Namespace:
 
     capture = subparsers.add_parser("capture", help="Summarise a Tier 1 market data capture")
     capture.add_argument("--dir", default="captures", help="Capture directory (default: captures)")
+
+    fills = subparsers.add_parser(
+        "fills", help="When the signal fires in a capture, was there a fillable ask?"
+    )
+    fills.add_argument("--dir", default="captures", help="Capture directory (default: captures)")
+    fills.add_argument(
+        "--delta", type=float, default=0.01,
+        help="Relaxed-variant delta to score (default 0.01 = 1%%). Use 0 for the strict bound.",
+    )
+    fills.add_argument("--min-yield", type=float, default=0.01, help="Net-yield threshold for 'fillable'.")
+    fills.add_argument("--window-size", type=int, default=60)
 
     return parser.parse_args()
 
@@ -71,10 +83,25 @@ def _run_capture(args: argparse.Namespace) -> None:
     print(format_stats(stats))
 
 
+def _run_fills(args: argparse.Namespace) -> None:
+    delta = args.delta if args.delta > 0 else None
+    name = "strict" if delta is None else f"relaxed-{delta:g}"
+    variant = Variant(name, delta)
+    results = analyze_fills(args.dir, variant, window_size=args.window_size)
+    if not results:
+        raise SystemExit(
+            f"No markets fired under {name} in {args.dir!r}. Need a capture spanning a settlement "
+            "window with both order book and index ticks."
+        )
+    print(format_fill_summary(summarize_fills(results, name, args.min_yield), args.min_yield))
+
+
 def main() -> None:
     args = _parse_args()
     if args.command == "signal":
         _run_signal(args)
+    elif args.command == "fills":
+        _run_fills(args)
     else:
         _run_capture(args)
 
