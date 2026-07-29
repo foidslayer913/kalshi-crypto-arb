@@ -20,6 +20,11 @@ python -m backtest signal --markets settled.jsonl --series BTC-USD=btc_1s.csv
 
 # Tier 1: inspect what the live capture has collected so far
 python -m backtest capture --dir captures
+
+# Fetch Tier 2 inputs (run locally — needs outbound network, read-only, no trading)
+python scripts/fetch_ground_truth.py inspect --series-ticker KXBTCD   # check schema FIRST
+python scripts/fetch_ground_truth.py markets --series-ticker KXBTCD -o data/settled.jsonl
+python scripts/fetch_ground_truth.py series --markets data/settled.jsonl --out-dir data/
 ```
 
 There is no linter configured yet.
@@ -80,7 +85,9 @@ WebSocket payloads are stored **unparsed**. The schema in `order_book.py` is wri
 
 All three phases are implemented end-to-end, plus the Tier 2 backtest. Two open items, in priority order:
 
-1. **Run the Tier 2 backtest on real data.** It needs a JSONL of settled crypto markets (ticker, strike_type, strike_price, close_time, result, crypto_symbol, settlement_value) and a 1 Hz index series per symbol. Until it runs against a real proxy feed the false-positive rate is unmeasured, and that number is what decides whether any relaxed variant is safe to trade. A synthetic run reports FP=0 only because the signal and the settlement value come from the same series — zero divergence by construction, not a result.
+1. **Run the Tier 2 backtest on real data.** `scripts/fetch_ground_truth.py` produces both inputs; it must run somewhere with outbound network (this repo's sandbox blocks Kalshi, Coinbase, and Binance at the proxy). Until it runs against a real proxy feed the false-positive rate is unmeasured, and that number is what decides whether any relaxed variant is safe to trade. A synthetic run reports FP=0 only because the signal and the settlement value come from the same series — zero divergence by construction, not a result. **The bar is roughly 1%**: buying at 98¢ risks 99¢ to make 1¢, so break-even needs FP below ~1%, and at 95¢ below ~4%.
+
+   Two things about that script are deliberate. It is strictly read-only (GETs against market-data endpoints, never orders), and it targets Kalshi's **production** market data rather than demo, because demo settlements are synthetic and would measure nothing. It therefore bypasses `config.Settings` on purpose — that guardrail constrains *order routing*, which is a different privilege from reading public settlement history, and it must not be loosened to accommodate reads. The index series comes from Binance rather than Coinbase only because Coinbase's public history bottoms out at 60-second candles — one candle per settlement window. That means Tier 2 measures single-venue divergence generally; to measure the bot's own Coinbase feed exactly, use the Tier 1 capture going forward.
 2. **Verify the wire schemas.** There's no live Kalshi Demo account in this environment, so `kalshi_ws.py`, `kalshi_rest.py`, and `order_book.py` have never been exercised against a real connection. Run `main.py` against a real Demo account and fix any mismatch between the assumed WebSocket/REST message shapes and Kalshi's actual ones.
 
 3. **Keep the capture running.** `backtest/recorder.py` is wired into `main.py` and writes to `CAPTURE_DIR` (default `captures/`, empty disables). Every day it is not running is a day of unrecoverable data — Kalshi publishes no historical order books, so the `(fire_second, best_ask)` joint distribution, fill rates, and the P&L-vs-latency curve are all unavailable until a capture exists. Budget roughly 150 bytes/event; at ~1M events/day that is ~150 MB/day uncompressed, so plan on gzipping rotated day files.
