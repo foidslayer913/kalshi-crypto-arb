@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from backtest.reconstruct import (
     DEFAULT_VARIANTS,
@@ -21,7 +22,12 @@ from backtest.reconstruct import (
     summarize,
 )
 from backtest.recorder import capture_stats, format_stats
-from backtest.window_fills import analyze_fills, format_fill_summary, summarize_fills
+from backtest.window_fills import (
+    analyze_fills,
+    format_fill_debug,
+    format_fill_summary,
+    summarize_fills,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -53,6 +59,10 @@ def _parse_args() -> argparse.Namespace:
     )
     fills.add_argument("--min-yield", type=float, default=0.01, help="Net-yield threshold for 'fillable'.")
     fills.add_argument("--window-size", type=int, default=60)
+    fills.add_argument(
+        "--debug", action="store_true",
+        help="Per-market breakdown (both best bids at fire) to tell a one-sided book from an empty one.",
+    )
 
     return parser.parse_args()
 
@@ -94,9 +104,13 @@ def _run_fills(args: argparse.Namespace) -> None:
             "window with both order book and index ticks."
         )
     print(format_fill_summary(summarize_fills(results, name, args.min_yield), args.min_yield))
+    if args.debug:
+        print()
+        print(format_fill_debug(results))
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _parse_args()
     if args.command == "signal":
         _run_signal(args)
