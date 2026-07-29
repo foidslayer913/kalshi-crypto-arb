@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     )
     market_tickers_raw: str = Field(default="", alias="MARKET_TICKERS")
     crypto_feed_symbols_raw: str = Field(default="BTC-USD,ETH-USD", alias="CRYPTO_FEED_SYMBOLS")
+    dry_run: bool = Field(default=True, alias="DRY_RUN")
+    max_daily_loss: float = Field(default=100.0, alias="MAX_DAILY_LOSS")
 
     @field_validator("kalshi_base_url", "kalshi_ws_url")
     @classmethod
