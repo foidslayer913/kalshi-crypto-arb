@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 
-from scripts.fetch_ground_truth import KALSHI_PROD_MARKET_DATA, _get
+from scripts.fetch_ground_truth import KALSHI_PROD_MARKET_DATA, _get, iter_settled_markets
 
 # Documented shape; probed rather than trusted, which is how the order book schema turned out wrong.
 CANDLESTICK_PATH = "/series/{series}/markets/{ticker}/candlesticks"
@@ -54,6 +54,75 @@ def _pick_market(markets_path: Path, prefer_traded: bool = True) -> dict:
         )
     # The busiest of the sample gives the best chance of a populated series.
     return max(candidates, key=lambda record: float(record.get("volume") or 0))
+
+
+STRUCTURE_KEYS = (
+    "ticker", "event_ticker", "market_type", "strike_type", "floor_strike", "cap_strike",
+    "custom_strike", "settlement_timer_seconds", "close_time", "open_time", "result",
+    "expiration_value", "volume", "open_interest", "rules_primary",
+)
+
+
+def pick_from_series(series_ticker: str, lookback_hours: float, limit: int = 400) -> dict:
+    """Most-traded recently-settled market in a series.
+
+    Recurring short-duration series list a fresh ticker every period — a 15-minute series turns over
+    96 tickers a day — so the useful unit is "the series", not any single ticker. Resolving a
+    representative settled market here keeps that churn out of the caller's hands.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    candidates: list[dict] = []
+    with httpx.Client(timeout=30.0) as client:
+        for market in iter_settled_markets(
+            client, KALSHI_PROD_MARKET_DATA, series_ticker,
+            int(now - lookback_hours * 3600), int(now),
+        ):
+            candidates.append(market)
+            if len(candidates) >= limit:
+                break
+    if not candidates:
+        raise SystemExit(
+            f"No settled markets for series {series_ticker!r} in the last {lookback_hours:.0f}h. "
+            "Try a longer --lookback-hours, or check the series ticker."
+        )
+    traded = [m for m in candidates if float(m.get("volume") or 0) > 0]
+    if not traded:
+        raise SystemExit(
+            f"{len(candidates)} settled {series_ticker} markets found but none traded — "
+            "no price history to probe."
+        )
+    return max(traded, key=lambda record: float(record.get("volume") or 0))
+
+
+def describe_structure(market: dict) -> None:
+    """Report the fields that decide whether the existing strategy code fits this series."""
+    print("--- market structure ---")
+    for key in STRUCTURE_KEYS:
+        if key in market:
+            value = market[key]
+            if isinstance(value, str) and len(value) > 200:
+                value = value[:200] + "..."
+            print(f"  {key:<28}{value}")
+    missing = [key for key in ("strike_type", "settlement_timer_seconds") if key not in market]
+    if missing:
+        print(f"  (absent from payload: {', '.join(missing)})")
+
+    timer = market.get("settlement_timer_seconds")
+    strike_type = market.get("strike_type")
+    print()
+    if timer is not None and timer != 60:
+        print(
+            f"  NOTE settlement_timer_seconds={timer}, not 60. The math engine's window is 60, so\n"
+            f"       backtests on this series need --window-size {timer}."
+        )
+    elif timer == 60:
+        print("  settlement_timer_seconds=60 — matches the 60-second window the math engine assumes.")
+    if strike_type not in ("greater", "less"):
+        print(
+            f"  NOTE strike_type={strike_type!r} is not the greater/less shape kalshi_rest._parse_market\n"
+            f"       handles; this series needs its strike derived differently."
+        )
+    print()
 
 
 def probe(ticker: str, close_ts: float, period_interval: int, hours_before: float) -> None:
@@ -122,7 +191,12 @@ def probe(ticker: str, close_ts: float, period_interval: int, hours_before: floa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--markets", default="data/settled.jsonl", help="JSONL from fetch_ground_truth markets")
+    parser.add_argument(
+        "--series-ticker", default=None,
+        help="Probe a live series, e.g. KXBTC15M. Resolves a recently-settled market for you.",
+    )
+    parser.add_argument("--lookback-hours", type=float, default=24.0, help="How far back to look for a settled market.")
+    parser.add_argument("--markets", default=None, help="JSONL from fetch_ground_truth markets")
     parser.add_argument("--ticker", default=None, help="Probe this market ticker directly.")
     parser.add_argument("--close-time", default=None, help="ISO close time, required with --ticker.")
     parser.add_argument("--period", type=int, default=1, help="period_interval in minutes (1, 60, 1440).")
@@ -135,11 +209,17 @@ def main() -> None:
         ticker = args.ticker
         close_ts = datetime.fromisoformat(args.close_time.replace("Z", "+00:00")).timestamp()
     else:
-        market = _pick_market(Path(args.markets))
+        if args.series_ticker:
+            market = pick_from_series(args.series_ticker, args.lookback_hours)
+            source = f"series {args.series_ticker}"
+        else:
+            market = _pick_market(Path(args.markets or "data/settled.jsonl"))
+            source = args.markets or "data/settled.jsonl"
         ticker = market["ticker"]
         close_ts = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00")).timestamp()
-        print(f"Probing busiest traded market from {args.markets}: {ticker} "
+        print(f"Probing busiest traded market from {source}: {ticker} "
               f"(volume {market.get('volume')})\n")
+        describe_structure(market)
 
     probe(ticker, close_ts, args.period, args.hours_before)
 
