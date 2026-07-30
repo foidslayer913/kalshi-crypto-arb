@@ -38,6 +38,9 @@ from backtest.conditional import (
     format_model,
     split_by_date,
 )
+from backtest.reaction import bucket_by_move, format_moves, format_verdict
+from backtest.reaction import build_observations as build_reaction
+from backtest.reaction import split_by_date as split_reaction
 from backtest.recorder import capture_stats, format_stats
 from backtest.window_fills import (
     analyze_fills,
@@ -122,6 +125,22 @@ def _parse_args() -> argparse.Namespace:
     conditional.add_argument(
         "--sigma", type=float, default=None,
         help="Override per-minute volatility. Default: measured from the index series.",
+    )
+
+    reaction = subparsers.add_parser(
+        "reaction",
+        help="Does a violent move overshoot? Measures buying the dip, by move size.",
+    )
+    reaction.add_argument("--observations", required=True, help="JSONL from scripts/fetch_calibration")
+    reaction.add_argument(
+        "--lookback", type=int, default=2, help="Minutes over which to measure the move (default 2).",
+    )
+    reaction.add_argument("--contracts", type=int, default=100)
+    reaction.add_argument("--min-minutes", type=float, default=1.0)
+    reaction.add_argument(
+        "--train-end", default=None,
+        help="Split date. Given, the same table is printed for both halves so an effect can be "
+             "checked for replication (YYYY-MM-DD).",
     )
 
     return parser.parse_args()
@@ -240,6 +259,38 @@ def _run_conditional(args: argparse.Namespace) -> None:
     print(format_evaluation(evaluate(model, test)))
 
 
+def _run_reaction(args: argparse.Namespace) -> None:
+    observations = build_reaction(
+        args.observations, lookback=args.lookback,
+        contracts=args.contracts, min_minutes=args.min_minutes,
+    )
+    if not observations:
+        raise SystemExit(f"No observations built from {args.observations!r}.")
+    markets = len({o.ticker for o in observations})
+    print(
+        f"{len(observations)} observations across {markets} markets, "
+        f"move measured over {args.lookback} minute(s)\n"
+    )
+
+    if args.train_end:
+        train, test = split_reaction(observations, args.train_end)
+        if not train or not test:
+            raise SystemExit("Train or test half is empty — pick a --train-end inside the range.")
+        for name, group in (("FIRST half (<= " + args.train_end + ")", train),
+                            ("SECOND half (> " + args.train_end + ")", test)):
+            buckets = bucket_by_move(group)
+            print(format_moves(buckets, name))
+            print()
+            print(format_verdict(buckets))
+            print()
+        print("An effect present in one half only is noise. Both halves must agree to be real.")
+    else:
+        buckets = bucket_by_move(observations)
+        print(format_moves(buckets, "All markets"))
+        print()
+        print(format_verdict(buckets))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _parse_args()
@@ -251,6 +302,8 @@ def main() -> None:
         _run_calibration(args)
     elif args.command == "conditional":
         _run_conditional(args)
+    elif args.command == "reaction":
+        _run_reaction(args)
     else:
         _run_capture(args)
 
