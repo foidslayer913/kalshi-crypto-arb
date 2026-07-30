@@ -19,8 +19,10 @@ Writes stay off the hot path: `record_*` builds a dict and appends it, and a bac
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
+import shutil
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 CAPTURE_SCHEMA_VERSION = 1
 CAPTURE_GLOB = "capture-*.jsonl"
+CAPTURE_GLOB_GZ = "capture-*.jsonl.gz"
 
 
 @dataclass(frozen=True)
@@ -151,8 +154,15 @@ class CaptureRecorder:
 
 
 def read_capture(path: str | Path) -> Iterator[CapturedEvent]:
-    """Stream events from a single capture file in recorded (arrival) order."""
-    with Path(path).open() as handle:
+    """Stream events from a single capture file in recorded (arrival) order.
+
+    Transparently reads gzipped day files, so compressing yesterday's capture does not break any
+    reader. At roughly 150 bytes an event and ~1M events a day, leaving days uncompressed is what
+    eventually fills the disk and stops the capture.
+    """
+    path = Path(path)
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt") as handle:
         for line in handle:
             line = line.strip()
             if not line:
@@ -163,7 +173,39 @@ def read_capture(path: str | Path) -> Iterator[CapturedEvent]:
 
 
 def capture_files(directory: str | Path) -> list[Path]:
-    return sorted(Path(directory).glob(CAPTURE_GLOB))
+    """Day files in chronological order, compressed or not.
+
+    The date sits at a fixed position in the name, so plain lexical sorting keeps days in order even
+    when some are gzipped and some are not.
+    """
+    directory = Path(directory)
+    return sorted(
+        [*directory.glob(CAPTURE_GLOB), *directory.glob(CAPTURE_GLOB_GZ)],
+        key=lambda path: path.name,
+    )
+
+
+def compress_completed_days(directory: str | Path, today: str | None = None) -> list[Path]:
+    """Gzip finished day files, leaving today's alone because it is still being appended to.
+
+    Returns the paths written. The original is removed only after the compressed copy is complete,
+    so an interrupted run cannot lose a day.
+    """
+    directory = Path(directory)
+    current = today or datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    written: list[Path] = []
+    for path in sorted(directory.glob(CAPTURE_GLOB)):
+        if current in path.name:
+            continue
+        target = path.with_suffix(path.suffix + ".gz")
+        if target.exists():
+            continue
+        with path.open("rb") as source, gzip.open(target, "wb") as sink:
+            shutil.copyfileobj(source, sink)
+        path.unlink()
+        written.append(target)
+        logger.info("Compressed %s -> %s", path.name, target.name)
+    return written
 
 
 def read_captures(directory: str | Path, kinds: Iterable[str] | None = None) -> Iterator[CapturedEvent]:
