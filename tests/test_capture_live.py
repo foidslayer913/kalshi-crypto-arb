@@ -48,9 +48,38 @@ def test_unsupported_strike_types_are_skipped_not_fatal():
     assert _market_info_from_dict(_raw("greater", close_time=None)) is None
 
 
-def test_capture_process_loads_no_execution_code():
-    # The read-only guarantee is structural: if execution/ ever gets imported here, this fails.
-    import sys
-    capture_live  # imported above, so its transitive imports are already loaded
-    leaked = [name for name in sys.modules if name.startswith("execution")]
-    assert leaked == [], f"capture process must not load order-placing code, found {leaked}"
+def test_capture_process_imports_no_execution_code():
+    """The read-only guarantee is structural, so verify it structurally.
+
+    Walks capture_live's transitive import graph in the source rather than inspecting sys.modules,
+    which other tests populate with execution/ imports of their own — that version of this check
+    passed alone and failed in a full run, which is worse than no check at all.
+    """
+    import ast
+    from pathlib import Path
+
+    def module_path(dotted: str) -> Path | None:
+        candidate = Path(*dotted.split(".")).with_suffix(".py")
+        return candidate if candidate.exists() else None
+
+    seen: set[str] = set()
+    pending = ["capture_live.py"]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        tree = ast.parse(Path(current).read_text())
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names.append(node.module)
+            elif isinstance(node, ast.Import):
+                names.extend(alias.name for alias in node.names)
+            for name in names:
+                path = module_path(name)
+                if path is not None:
+                    pending.append(str(path))
+
+    offenders = sorted(name for name in seen if name.startswith("execution"))
+    assert offenders == [], f"capture must not reach order-placing code, found {offenders}"
