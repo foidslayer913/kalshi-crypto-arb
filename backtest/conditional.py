@@ -109,6 +109,14 @@ class ConditionalObservation:
     """Standardised index distance from the strike, signed so higher always favours `side`."""
     close_date: str
     contracts: int = 1
+    slope: float = 0.0
+    """Standardised index *velocity* over the lookback, signed so positive favours `side`.
+
+    Level and velocity are different information. `z` says where the index sits; `slope` says which
+    way it is travelling. For a driftless random walk slope is worthless by construction, so any
+    predictive power it shows is evidence of short-horizon trend — and it is only *tradeable* if the
+    market has not already priced that trend.
+    """
 
     @property
     def fee_per_contract(self) -> float:
@@ -141,11 +149,15 @@ def build_observations(
     min_minutes: float = 1.0,
     min_price: float = 0.05,
     max_price: float = 0.995,
+    slope_lookback: int = 0,
 ) -> list[ConditionalObservation]:
     """Join candle observations to the index and standardise the distance from the strike.
 
     `min_price` is far lower than the unconditional study's default: the whole point is to find
     moments where the market is wrong, and those can sit anywhere on the price scale.
+
+    `slope_lookback > 0` additionally measures the index's velocity over that many minutes, in the
+    same standardised units as `z`, so trend can be tested as information separate from level.
     """
     sigma = sigma_per_minute if sigma_per_minute is not None else index.sigma_per_minute()
     built: list[ConditionalObservation] = []
@@ -174,12 +186,19 @@ def build_observations(
         z_yes = math.log(spot / strike) / scale
         close_date = close_time[:10]
 
+        slope_yes = 0.0
+        if slope_lookback > 0:
+            earlier = index.price_at(candle_ts - slope_lookback * 60)
+            if earlier is None or earlier <= 0:
+                continue  # cannot measure velocity here, so do not guess it as flat
+            slope_yes = math.log(spot / earlier) / (sigma * math.sqrt(slope_lookback))
+
         yes_ask = row.get("yes_ask")
         if yes_ask is not None and min_price <= float(yes_ask) < max_price:
             built.append(
                 ConditionalObservation(
                     row.get("ticker", "?"), "yes", float(yes_ask), result == "yes",
-                    minutes, z_yes, close_date, contracts,
+                    minutes, z_yes, close_date, contracts, slope_yes,
                 )
             )
         yes_bid = row.get("yes_bid")
@@ -189,7 +208,7 @@ def build_observations(
                 built.append(
                     ConditionalObservation(
                         row.get("ticker", "?"), "no", no_ask, result == "no",
-                        minutes, -z_yes, close_date, contracts,
+                        minutes, -z_yes, close_date, contracts, -slope_yes,
                     )
                 )
     return built
@@ -202,13 +221,21 @@ def _to_unix_iso(value: str) -> float:
 
 
 class FairModel:
-    """Empirical P(win | z), fit by bucketing z and measuring realized frequency."""
+    """Empirical P(win | z), optionally P(win | z, slope), from realized frequencies.
 
-    def __init__(self, width: float = 0.25, min_samples: int = 40) -> None:
+    Adding the slope dimension multiplies the number of cells, so each is fit on fewer samples. That
+    is the cost of asking a richer question, and it is why `min_samples` matters more in 2-D: a cell
+    with a handful of observations reports noise as a probability.
+    """
+
+    def __init__(
+        self, width: float = 0.25, min_samples: int = 40, slope_width: float | None = None
+    ) -> None:
         self.width = width
         self.min_samples = min_samples
-        self._rate: dict[int, float] = {}
-        self._counts: dict[int, int] = {}
+        self.slope_width = slope_width
+        self._rate: dict[tuple[int, int], float] = {}
+        self._counts: dict[tuple[int, int], int] = {}
         self._fallback = 0.5
 
     def _bucket(self, z: float) -> int:
@@ -216,11 +243,17 @@ class FairModel:
         # rates are pure noise.
         return max(-16, min(16, int(math.floor(z / self.width))))
 
+    def _key(self, z: float, slope: float) -> tuple[int, int]:
+        if self.slope_width is None:
+            return (self._bucket(z), 0)
+        slope_bucket = max(-8, min(8, int(math.floor(slope / self.slope_width))))
+        return (self._bucket(z), slope_bucket)
+
     def fit(self, observations: list[ConditionalObservation]) -> "FairModel":
-        wins: dict[int, int] = {}
-        total: dict[int, int] = {}
+        wins: dict[tuple[int, int], int] = {}
+        total: dict[tuple[int, int], int] = {}
         for observation in observations:
-            key = self._bucket(observation.z)
+            key = self._key(observation.z, observation.slope)
             total[key] = total.get(key, 0) + 1
             wins[key] = wins.get(key, 0) + (1 if observation.won else 0)
         self._counts = total
@@ -231,16 +264,52 @@ class FairModel:
             self._fallback = sum(1 for o in observations if o.won) / len(observations)
         return self
 
-    def probability(self, z: float) -> float | None:
-        """Fair win probability for this z, or None where the fit has too little support."""
-        return self._rate.get(self._bucket(z))
+    def probability(self, z: float, slope: float = 0.0) -> float | None:
+        """Fair win probability for this cell, or None where the fit has too little support."""
+        return self._rate.get(self._key(z, slope))
+
+    def cells(self) -> int:
+        return len(self._rate)
 
     def table(self) -> list[tuple[float, float, int, float]]:
-        """(z_low, z_high, samples, win_rate) for each fitted bucket."""
+        """(z_low, z_high, samples, win_rate) collapsed over slope, for the readability check."""
+        by_z: dict[int, tuple[int, float]] = {}
+        for (z_key, _), rate in self._rate.items():
+            samples = self._counts[(z_key, _)]
+            previous_samples, previous_weighted = by_z.get(z_key, (0, 0.0))
+            by_z[z_key] = (previous_samples + samples, previous_weighted + rate * samples)
         return [
-            (key * self.width, (key + 1) * self.width, self._counts[key], self._rate[key])
-            for key in sorted(self._rate)
+            (key * self.width, (key + 1) * self.width, samples, weighted / samples)
+            for key, (samples, weighted) in sorted(by_z.items())
         ]
+
+
+def mean_absolute_error(
+    model: FairModel, observations: list[ConditionalObservation]
+) -> tuple[float, float, int]:
+    """(model MAE, market MAE, n) over observations the model will score.
+
+    This is the diagnostic that separates the two questions a new feature raises. Does it make the
+    *model* better — model MAE falling when the feature is added? And does the better model beat the
+    *market* — model MAE below market MAE? A feature can pass the first and fail the second, which
+    means the information is real but already in the price.
+    """
+    model_errors: list[float] = []
+    market_errors: list[float] = []
+    for observation in observations:
+        probability = model.probability(observation.z, observation.slope)
+        if probability is None:
+            continue
+        outcome = 1.0 if observation.won else 0.0
+        model_errors.append(abs(outcome - probability))
+        market_errors.append(abs(outcome - observation.price))
+    if not model_errors:
+        return (float("nan"), float("nan"), 0)
+    return (
+        sum(model_errors) / len(model_errors),
+        sum(market_errors) / len(market_errors),
+        len(model_errors),
+    )
 
 
 @dataclass(frozen=True)
@@ -267,7 +336,7 @@ def evaluate(
     """
     scored: list[tuple[float, ConditionalObservation, float]] = []
     for observation in observations:
-        model_p = model.probability(observation.z)
+        model_p = model.probability(observation.z, observation.slope)
         if model_p is None:
             continue
         scored.append((model_p - observation.breakeven, observation, model_p))

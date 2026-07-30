@@ -11,6 +11,7 @@ from backtest.conditional import (
     MinuteIndex,
     build_observations,
     evaluate,
+    mean_absolute_error,
     split_by_date,
 )
 
@@ -181,3 +182,114 @@ def test_split_by_date_puts_later_markets_in_test():
     train, test = split_by_date(observations, "2026-07-15")
     assert {o.close_date for o in train} == {"2026-07-10"}
     assert {o.close_date for o in test} == {"2026-07-20"}
+
+
+def _index_with_trend(tmp_path, drift_per_min, minutes=400, start_ts=1_785_000_000, sigma=0.0005, seed=7):
+    """An index with a deliberate drift, so velocity genuinely predicts where it ends up."""
+    rng = random.Random(seed)
+    price = 64000.0
+    rows = []
+    for i in range(minutes):
+        price *= math.exp(drift_per_min + rng.gauss(0, sigma))
+        rows.append((start_ts + i * MINUTE, price))
+    path = tmp_path / f"trend_{drift_per_min}.csv"
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["timestamp", "price"])
+        for timestamp, value in rows:
+            writer.writerow([timestamp, f"{value:.2f}"])
+    return path, rows
+
+
+def test_slope_is_measured_and_signed_per_side(tmp_path):
+    path, rows = _index_with_trend(tmp_path, drift_per_min=0.0005)
+    index = MinuteIndex.from_csv(path)
+    obs_path = _observations_file(tmp_path, rows, +0.0, "yes", count=3)
+    built = build_observations(obs_path, index, min_price=0.0, slope_lookback=3)
+    yes = [o for o in built if o.side == "yes"]
+    no = [o for o in built if o.side == "no"]
+    assert all(o.slope > 0 for o in yes)      # index is trending up, favouring YES
+    assert all(o.slope < 0 for o in no)
+    assert yes[0].slope == pytest.approx(-no[0].slope)
+
+
+def test_slope_defaults_to_zero_when_lookback_disabled(tmp_path):
+    path, rows = _index_with_trend(tmp_path, drift_per_min=0.0005)
+    index = MinuteIndex.from_csv(path)
+    obs_path = _observations_file(tmp_path, rows, +0.0, "yes", count=3)
+    built = build_observations(obs_path, index, min_price=0.0, slope_lookback=0)
+    assert all(o.slope == 0.0 for o in built)
+
+
+def test_observation_is_dropped_when_slope_history_is_missing(tmp_path):
+    # No index far enough back to measure velocity: better to drop than to assume flat.
+    path, rows = _index_with_trend(tmp_path, drift_per_min=0.0)
+    index = MinuteIndex.from_csv(path)
+    obs_path = _observations_file(tmp_path, rows, +0.0, "yes", count=2, start=0)
+    without = build_observations(obs_path, index, min_price=0.0, slope_lookback=0)
+    with_huge = build_observations(obs_path, index, min_price=0.0, slope_lookback=10_000)
+    assert without
+    assert with_huge == []
+
+
+def _slope_obs(n, price, z, slope, win_rate, date, seed):
+    rng = random.Random(seed)
+    return [
+        ConditionalObservation(
+            f"{date}-{slope}-M{i}", "yes", price, rng.random() < win_rate, 5.0, z, date, 100, slope
+        )
+        for i in range(n)
+    ]
+
+
+def test_two_dimensional_model_separates_cells_by_slope():
+    # Same z, opposite slopes, very different outcomes: only a 2-D model can express this.
+    train = (
+        _slope_obs(400, 0.50, 0.0, +1.5, 0.85, "2026-07-01", 41)
+        + _slope_obs(400, 0.50, 0.0, -1.5, 0.15, "2026-07-01", 42)
+    )
+    flat = FairModel(width=0.5, min_samples=40).fit(train)
+    two_d = FairModel(width=0.5, min_samples=40, slope_width=1.0).fit(train)
+
+    # The level-only model must give one answer regardless of slope.
+    assert flat.probability(0.0, +1.5) == flat.probability(0.0, -1.5)
+    # The 2-D model must distinguish them.
+    assert two_d.probability(0.0, +1.5) > 0.7
+    assert two_d.probability(0.0, -1.5) < 0.3
+
+
+def test_mean_absolute_error_shows_slope_helping_when_it_carries_information():
+    train = (
+        _slope_obs(400, 0.50, 0.0, +1.5, 0.85, "2026-07-01", 43)
+        + _slope_obs(400, 0.50, 0.0, -1.5, 0.15, "2026-07-01", 44)
+    )
+    test = (
+        _slope_obs(400, 0.50, 0.0, +1.5, 0.85, "2026-07-20", 45)
+        + _slope_obs(400, 0.50, 0.0, -1.5, 0.15, "2026-07-20", 46)
+    )
+    flat_mae, market_mae, _ = mean_absolute_error(FairModel(width=0.5, min_samples=40).fit(train), test)
+    slope_mae, _, _ = mean_absolute_error(
+        FairModel(width=0.5, min_samples=40, slope_width=1.0).fit(train), test
+    )
+    assert slope_mae < flat_mae - 0.05  # velocity is genuinely informative here
+    assert slope_mae < market_mae      # and the price ignores it, so the model wins
+
+
+def test_mean_absolute_error_shows_the_market_winning_when_the_price_already_knows():
+    # Slope predicts the outcome AND the price already reflects it: the model improves but cannot
+    # beat the market. This is the case that must not be mistaken for an edge.
+    def group(slope, probability, date, seed):
+        rng = random.Random(seed)
+        return [
+            ConditionalObservation(
+                f"{date}-{slope}-M{i}", "yes", probability, rng.random() < probability,
+                5.0, 0.0, date, 100, slope,
+            )
+            for i in range(500)
+        ]
+
+    train = group(+1.5, 0.85, "2026-07-01", 47) + group(-1.5, 0.15, "2026-07-01", 48)
+    test = group(+1.5, 0.85, "2026-07-20", 49) + group(-1.5, 0.15, "2026-07-20", 50)
+    model = FairModel(width=0.5, min_samples=40, slope_width=1.0).fit(train)
+    model_mae, market_mae, _ = mean_absolute_error(model, test)
+    assert market_mae <= model_mae + 0.01  # the price is at least as good as the model

@@ -36,6 +36,7 @@ from backtest.conditional import (
     evaluate,
     format_evaluation,
     format_model,
+    mean_absolute_error,
     split_by_date,
 )
 from backtest.reaction import bucket_by_move, format_moves, format_verdict
@@ -125,6 +126,14 @@ def _parse_args() -> argparse.Namespace:
     conditional.add_argument(
         "--sigma", type=float, default=None,
         help="Override per-minute volatility. Default: measured from the index series.",
+    )
+    conditional.add_argument(
+        "--slope-lookback", type=int, default=0,
+        help="Minutes over which to measure index VELOCITY and add it as a second model dimension. "
+             "0 (default) uses level only.",
+    )
+    conditional.add_argument(
+        "--slope-width", type=float, default=1.0, help="Slope bucket width when --slope-lookback is set.",
     )
 
     reaction = subparsers.add_parser(
@@ -237,6 +246,7 @@ def _run_conditional(args: argparse.Namespace) -> None:
     observations = build_observations(
         args.observations, index, sigma_per_minute=sigma,
         contracts=args.contracts, min_minutes=args.min_minutes,
+        slope_lookback=args.slope_lookback,
     )
     if not observations:
         raise SystemExit(
@@ -251,11 +261,39 @@ def _run_conditional(args: argparse.Namespace) -> None:
     if not train or not test:
         raise SystemExit("Train or test set is empty — pick a --train-end inside the data's range.")
 
-    model = FairModel(width=args.z_width, min_samples=args.min_samples).fit(train)
+    slope_width = args.slope_width if args.slope_lookback > 0 else None
+    model = FairModel(
+        width=args.z_width, min_samples=args.min_samples, slope_width=slope_width
+    ).fit(train)
     if not model.table():
         raise SystemExit("No z bucket had enough training samples; lower --min-samples.")
     print(format_model(model))
     print()
+
+    if args.slope_lookback > 0:
+        # Two separate questions: does velocity make the model better, and does the better model
+        # beat the market? A feature can pass the first and fail the second, meaning the information
+        # is real but already in the price.
+        level_only = FairModel(width=args.z_width, min_samples=args.min_samples).fit(train)
+        level_mae, market_mae, level_n = mean_absolute_error(level_only, test)
+        slope_mae, _, slope_n = mean_absolute_error(model, test)
+        print(f"Held-out predictive accuracy (mean absolute error, lower is better):")
+        print(f"  level only (z)            {level_mae:.4f}   over {level_n} observations")
+        print(f"  level + slope             {slope_mae:.4f}   over {slope_n} observations")
+        print(f"  market price              {market_mae:.4f}   <- the benchmark to beat")
+        if slope_mae < level_mae - 0.001:
+            print(f"  -> slope IMPROVES the model by {level_mae - slope_mae:.4f}: short-horizon trend")
+            print("     carries real information beyond level.")
+        else:
+            print("  -> slope does NOT improve the model: index velocity adds nothing to level,")
+            print("     which is what a driftless random walk looks like.")
+        if slope_mae < market_mae:
+            print("  -> and the model now BEATS the market. Read the divergence table below closely.")
+        else:
+            print(f"  -> but the market is still {market_mae - slope_mae:+.4f} better. Any information")
+            print("     slope carries is already in the price.")
+        print()
+
     print(format_evaluation(evaluate(model, test)))
 
 
