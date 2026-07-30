@@ -191,3 +191,33 @@ def test_pooling_handles_a_single_market():
 def test_pooling_empty_returns_none():
     from backtest.calibration import pool
     assert pool([], "none") is None
+
+
+def test_pooled_edge_agrees_with_realized_minus_breakeven():
+    from backtest.calibration import pool
+    # The bug this pins: market-equal-weighting reported a POSITIVE pooled edge for a range whose
+    # realized rate sat below breakeven, contradicting every bucket inside it.
+    # Losers linger in the band (many candles); winners pass through (one candle).
+    observations = []
+    for m in range(40):  # winners: one observation each
+        observations.append(Observation(f"W{m}", "yes", 0.60, True, 5.0, contracts=100))
+    for m in range(60):  # losers: fifteen observations each
+        for minute in range(1, 16):
+            observations.append(Observation(f"L{m}", "yes", 0.60, False, float(minute), contracts=100))
+
+    result = pool(observations, "band")
+    realized = result.realized
+    assert realized < result.mean_breakeven  # this range loses money
+    assert result.edge < 0  # the pooled estimate must say so too
+    assert result.edge == pytest.approx(realized - result.mean_breakeven, abs=1e-9)
+
+
+def test_pooled_estimate_is_observation_weighted_not_market_weighted():
+    from backtest.calibration import pool
+    # 1 winner with 1 candle, 3 losers with 10 candles each: 1/31 observations win.
+    observations = [Observation("W", "yes", 0.50, True, 5.0, contracts=100)]
+    for m in range(3):
+        for minute in range(1, 11):
+            observations.append(Observation(f"L{m}", "yes", 0.50, False, float(minute), contracts=100))
+    result = pool(observations, "x")
+    assert result.realized == pytest.approx(1 / 31)  # not 1/4, which market-weighting would give

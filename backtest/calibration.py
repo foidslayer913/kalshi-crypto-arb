@@ -304,38 +304,50 @@ def pool(observations: list[Observation], label: str) -> PooledResult | None:
     detection floor is several cents — so a real edge is invisible bucket by bucket no matter how
     consistent it is. Pooling tests the pattern directly.
 
-    Two choices make the interval honest:
+    The estimate and its uncertainty come from different places, and conflating them inverts the
+    result:
 
-    * Edge is measured per observation as `won - breakeven`, then **averaged within each market
-      first**. Observations from one market share an outcome, so treating them as independent would
-      shrink the interval by roughly the number of candles per market.
-    * The standard error comes from the spread *across markets*, which is the level at which
-      outcomes are actually independent.
+    * The **point estimate is observation-weighted** — the average of `won - breakeven` over every
+      opportunity — because the question is "what does a contract earn if I trade each chance I
+      get?". Averaging within markets first and then across markets answers a different question
+      and can flip the sign: a market that passes briefly through a price band en route to winning
+      contributes one observation, while one that sits in the band all period and loses contributes
+      fifteen, so equal-weighting markets over-counts the brief visitors.
+    * The **standard error is cluster-robust**, summing residuals within each market before
+      squaring. Candles from one market share an outcome, so treating them as independent would
+      shrink the interval by roughly the square root of the candles per market.
 
     Pooling assumes the per-contract edge is roughly constant in dollars across the range, which is
     why it is worth running on sub-ranges rather than the whole book at once.
     """
     if not observations:
         return None
-    per_market: dict[str, list[float]] = {}
-    for observation in observations:
-        edge = (1.0 if observation.won else 0.0) - observation.breakeven
-        per_market.setdefault(observation.ticker, []).append(edge)
-    market_edges = [sum(edges) / len(edges) for edges in per_market.values()]
-    n = len(market_edges)
-    mean_edge = sum(market_edges) / n
-    if n > 1:
-        variance = sum((edge - mean_edge) ** 2 for edge in market_edges) / (n - 1)
-        se = math.sqrt(variance / n)
+    edges = [(1.0 if o.won else 0.0) - o.breakeven for o in observations]
+    n = len(edges)
+    mean_edge = sum(edges) / n
+
+    residuals_by_market: dict[str, float] = {}
+    for observation, edge in zip(observations, edges):
+        residuals_by_market[observation.ticker] = (
+            residuals_by_market.get(observation.ticker, 0.0) + (edge - mean_edge)
+        )
+    groups = len(residuals_by_market)
+    if groups > 1:
+        # Sandwich estimator: square the *cluster* sum, not each residual, so within-market
+        # correlation inflates the variance instead of vanishing into it.
+        meat = sum(total**2 for total in residuals_by_market.values())
+        correction = groups / (groups - 1)
+        se = math.sqrt(meat * correction) / n
     else:
         se = float("inf")
+
     return PooledResult(
         label=label,
-        observations=len(observations),
-        markets=n,
-        mean_price=sum(o.price for o in observations) / len(observations),
-        mean_breakeven=sum(o.breakeven for o in observations) / len(observations),
-        realized=sum(1 for o in observations if o.won) / len(observations),
+        observations=n,
+        markets=groups,
+        mean_price=sum(o.price for o in observations) / n,
+        mean_breakeven=sum(o.breakeven for o in observations) / n,
+        realized=sum(1 for o in observations if o.won) / n,
         edge=mean_edge,
         edge_se=se,
     )
