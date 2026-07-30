@@ -86,6 +86,8 @@ def _parse_args() -> argparse.Namespace:
     calibration.add_argument(
         "--min-markets", type=int, default=30, help="Buckets below this are reported as 'thin'.",
     )
+    calibration.add_argument("--start", default=None, help="Only markets closing on/after YYYY-MM-DD.")
+    calibration.add_argument("--end", default=None, help="Only markets closing on/before YYYY-MM-DD.")
 
     return parser.parse_args()
 
@@ -149,6 +151,8 @@ def _run_calibration(args: argparse.Namespace) -> None:
         max_minutes=args.max_minutes,
         min_price=args.min_price,
         max_price=args.max_price,
+        start=args.start,
+        end=args.end,
     )
     if not observations:
         raise SystemExit(

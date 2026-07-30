@@ -52,6 +52,8 @@ def load_observations(
     max_minutes: float | None = None,
     min_price: float = 0.50,
     max_price: float = 0.995,
+    start: str | None = None,
+    end: str | None = None,
 ) -> list[Observation]:
     """Expand candle rows into tradeable propositions.
 
@@ -62,6 +64,13 @@ def load_observations(
     """
     observations: list[Observation] = []
     for row in _read_rows(path):
+        # Date filtering enables the held-out check — fit on one range, confirm on another — without
+        # re-fetching. An edge that does not survive a different period is a fit to noise.
+        close_time = row.get("close_time") or ""
+        if start is not None and close_time[:10] < start:
+            continue
+        if end is not None and close_time[:10] > end:
+            continue
         minutes = float(row.get("minutes_to_close", 0.0))
         if minutes < min_minutes or (max_minutes is not None and minutes > max_minutes):
             continue
@@ -225,8 +234,24 @@ def format_calibration(buckets: list[Bucket], min_markets: int = 30) -> str:
             f"No bucket is profitable once uncertainty is accounted for (min {min_markets} markets)."
         )
         lines.append(
-            "That is the honest read of a fairly-priced market: the quoted price already includes "
-            "what the fee takes."
+            "Read this as 'no edge large enough to detect at this sample size', not 'no edge'. "
+            "See the detection limits below."
+        )
+
+    # State the test's power. Without this, "no finding" reads as "no edge" when it may only mean
+    # the sample cannot resolve an edge worth trading.
+    if tested:
+        lines.append("")
+        lines.append("Smallest edge detectable per bucket (95%, from market counts):")
+        for bucket in tested:
+            p = max(min(bucket.realized, 0.999), 0.001)
+            detectable = 1.96 * math.sqrt(p * (1 - p) / bucket.markets)
+            lines.append(
+                f"  {bucket.low:.2f}-{bucket.high:.2f}  {bucket.markets:>5} markets  "
+                f"needs > ${detectable:.3f}/contract to show up"
+            )
+        lines.append(
+            "  More markets, or wider buckets (--width 0.05), lower these thresholds."
         )
     return "\n".join(lines)
 
