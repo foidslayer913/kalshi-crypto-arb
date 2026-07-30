@@ -29,6 +29,15 @@ from backtest.calibration import (
     format_pooled,
     load_observations,
 )
+from backtest.conditional import (
+    FairModel,
+    MinuteIndex,
+    build_observations,
+    evaluate,
+    format_evaluation,
+    format_model,
+    split_by_date,
+)
 from backtest.recorder import capture_stats, format_stats
 from backtest.window_fills import (
     analyze_fills,
@@ -92,6 +101,27 @@ def _parse_args() -> argparse.Namespace:
     calibration.add_argument(
         "--contracts", type=int, default=100,
         help="Order size used for the fee. The fee rounds up per ORDER, so 1 contract pays far\nmore per contract than 100 (default 100).",
+    )
+
+    conditional = subparsers.add_parser(
+        "conditional",
+        help="Is the market wrong when the INDEX says it should be? (trains and tests on split dates)",
+    )
+    conditional.add_argument("--observations", required=True, help="JSONL from scripts/fetch_calibration")
+    conditional.add_argument("--index", required=True, help="1m index CSV from scripts/fetch_index_minutes")
+    conditional.add_argument(
+        "--train-end", required=True,
+        help="Markets closing on/before this date train the model; later ones test it (YYYY-MM-DD).",
+    )
+    conditional.add_argument("--contracts", type=int, default=100)
+    conditional.add_argument("--min-minutes", type=float, default=1.0)
+    conditional.add_argument("--z-width", type=float, default=0.25, help="z bucket width for the model.")
+    conditional.add_argument(
+        "--min-samples", type=int, default=40, help="Minimum training samples for a z bucket to be used.",
+    )
+    conditional.add_argument(
+        "--sigma", type=float, default=None,
+        help="Override per-minute volatility. Default: measured from the index series.",
     )
 
     return parser.parse_args()
@@ -180,6 +210,36 @@ def _run_calibration(args: argparse.Namespace) -> None:
     print(format_by_horizon(observations))
 
 
+def _run_conditional(args: argparse.Namespace) -> None:
+    index = MinuteIndex.from_csv(args.index)
+    sigma = args.sigma if args.sigma is not None else index.sigma_per_minute()
+    print(f"index: {len(index)} minutes; sigma/minute = {sigma:.6f} ({sigma * 100:.4f}%)\n")
+
+    observations = build_observations(
+        args.observations, index, sigma_per_minute=sigma,
+        contracts=args.contracts, min_minutes=args.min_minutes,
+    )
+    if not observations:
+        raise SystemExit(
+            "No observations could be joined to the index. Check that the index date range covers "
+            "the markets in the observations file."
+        )
+    train, test = split_by_date(observations, args.train_end)
+    print(
+        f"{len(observations)} observations joined to the index: "
+        f"{len(train)} train (<= {args.train_end}), {len(test)} test (> {args.train_end})\n"
+    )
+    if not train or not test:
+        raise SystemExit("Train or test set is empty — pick a --train-end inside the data's range.")
+
+    model = FairModel(width=args.z_width, min_samples=args.min_samples).fit(train)
+    if not model.table():
+        raise SystemExit("No z bucket had enough training samples; lower --min-samples.")
+    print(format_model(model))
+    print()
+    print(format_evaluation(evaluate(model, test)))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _parse_args()
@@ -189,6 +249,8 @@ def main() -> None:
         _run_fills(args)
     elif args.command == "calibration":
         _run_calibration(args)
+    elif args.command == "conditional":
+        _run_conditional(args)
     else:
         _run_capture(args)
 
