@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,8 +136,14 @@ def analyze_fills(
     *,
     window_size: int = 60,
     prefix_map: dict[str, str] | None = None,
+    reasons: Counter | None = None,
 ) -> list[FillResult]:
-    """Score every captured market that fires under `variant` for whether a fillable ask existed."""
+    """Score every captured market that fires under `variant` for whether a fillable ask existed.
+
+    `reasons`, if given, is populated with why each captured market was or was not scored. A
+    fill analysis that quietly drops most of a capture looks identical to one that found nothing,
+    so the disposition of every market needs to be inspectable.
+    """
     prefix_map = prefix_map or DEFAULT_PREFIX_MAP
     markets = captured_markets(directory)
 
@@ -178,19 +184,28 @@ def analyze_fills(
 
     results: list[FillResult] = []
     skipped_uncaptured = 0
+    tally = reasons if reasons is not None else Counter()
     for market in markets:
         symbol = resolve_crypto_symbol(market.ticker, prefix_map)
         series = series_by_symbol.get(symbol) if symbol else None
         if series is None:
+            tally["no index series for symbol"] += 1
             continue
         close_ts = market.close_time.timestamp()
         ticks = series.window_ticks(close_ts, window_size)
+        known = sum(1 for tick in ticks if tick is not None)
+        if known == 0:
+            # No index ticks in the settlement window: the bound has nothing to evaluate, so this
+            # is a gap in the index feed, not a market that declined to fire.
+            tally["no index ticks in settlement window"] += 1
+            continue
         settled = SettledMarket(
             ticker=market.ticker, strike_type=market.strike_type, strike_price=market.strike_price,
             close_time=market.close_time, result="yes", crypto_symbol=symbol,  # result unused here
         )
         signal = evaluate_window(settled, ticks, variant, window_size)
         if not signal.fired or signal.predicted is None or signal.fire_second is None:
+            tally["never fired (bound never closed)"] += 1
             continue
 
         side: Side = signal.predicted
@@ -201,6 +216,7 @@ def analyze_fills(
         first_seen = first_ws_by_ticker.get(market.ticker)
         if first_seen is None or first_seen > fire_ts or not streaming_at(fire_ts):
             skipped_uncaptured += 1
+            tally["fired, but book not being captured at that instant"] += 1
             continue
         close_minus_1 = close_ts - 1
         sample_times = sorted({fire_ts, close_minus_1})
@@ -225,6 +241,7 @@ def analyze_fills(
                 ws_events=len(payloads),
             )
         )
+        tally["scored"] += 1
     if skipped_uncaptured:
         logger.info(
             "Skipped %d market(s) whose settlement window fell outside the captured time span "

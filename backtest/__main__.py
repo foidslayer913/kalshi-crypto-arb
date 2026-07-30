@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections import Counter
 
 from backtest.reconstruct import (
     DEFAULT_VARIANTS,
@@ -97,12 +98,22 @@ def _run_fills(args: argparse.Namespace) -> None:
     delta = args.delta if args.delta > 0 else None
     name = "strict" if delta is None else f"relaxed-{delta:g}"
     variant = Variant(name, delta)
-    results = analyze_fills(args.dir, variant, window_size=args.window_size)
+    reasons: Counter[str] = Counter()
+    results = analyze_fills(args.dir, variant, window_size=args.window_size, reasons=reasons)
+
+    def print_disposition() -> None:
+        total = sum(reasons.values())
+        print(f"captured markets   {total}")
+        for reason, count in reasons.most_common():
+            print(f"  {reason:<44}{count}")
+
     if not results:
+        print_disposition()
         raise SystemExit(
-            f"No markets fired under {name} in {args.dir!r}. Need a capture spanning a settlement "
-            "window with both order book and index ticks."
+            f"\nNo markets scored under {name} in {args.dir!r} — see the dispositions above for why."
         )
+    print_disposition()
+    print()
     print(format_fill_summary(summarize_fills(results, name, args.min_yield), args.min_yield))
     if args.debug:
         print()
