@@ -88,6 +88,10 @@ def _parse_args() -> argparse.Namespace:
     )
     calibration.add_argument("--start", default=None, help="Only markets closing on/after YYYY-MM-DD.")
     calibration.add_argument("--end", default=None, help="Only markets closing on/before YYYY-MM-DD.")
+    calibration.add_argument(
+        "--contracts", type=int, default=100,
+        help="Order size used for the fee. The fee rounds up per ORDER, so 1 contract pays far\nmore per contract than 100 (default 100).",
+    )
 
     return parser.parse_args()
 
@@ -153,6 +157,7 @@ def _run_calibration(args: argparse.Namespace) -> None:
         max_price=args.max_price,
         start=args.start,
         end=args.end,
+        contracts=args.contracts,
     )
     if not observations:
         raise SystemExit(
@@ -162,7 +167,8 @@ def _run_calibration(args: argparse.Namespace) -> None:
     markets = len({observation.ticker for observation in observations})
     print(
         f"{len(observations)} tradeable observations across {markets} markets "
-        f"(prices {args.min_price}-{args.max_price}, >= {args.min_minutes} min to close)\n"
+        f"(prices {args.min_price}-{args.max_price}, >= {args.min_minutes} min to close, "
+        f"fees at {args.contracts} contracts/order)\n"
     )
     buckets = bucket_observations(observations, width=args.width)
     print(format_calibration(buckets, min_markets=args.min_markets))

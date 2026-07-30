@@ -38,11 +38,23 @@ class Observation:
     price: float
     won: bool
     minutes_to_close: float
+    contracts: int = 1
+
+    @property
+    def fee_per_contract(self) -> float:
+        """Taker fee per contract at this order size.
+
+        Order size matters more than it looks: the fee rounds up to a whole cent for the *order*,
+        so one contract at 91c pays ceil(0.573c) = 1c while 100 contracts pay 0.573c each. Pricing
+        an edge off the single-contract fee overstates costs by more than half, which is decisive
+        when the effect being measured is only a cent or two.
+        """
+        return calculate_fee(self.contracts, self.price) / self.contracts
 
     @property
     def breakeven(self) -> float:
         """Probability at which this trade is EV-neutral, including the taker fee."""
-        return self.price + calculate_fee(1, self.price)
+        return self.price + self.fee_per_contract
 
 
 def load_observations(
@@ -54,6 +66,7 @@ def load_observations(
     max_price: float = 0.995,
     start: str | None = None,
     end: str | None = None,
+    contracts: int = 1,
 ) -> list[Observation]:
     """Expand candle rows into tradeable propositions.
 
@@ -83,14 +96,16 @@ def load_observations(
         yes_ask = row.get("yes_ask")
         if yes_ask is not None and min_price <= float(yes_ask) < max_price:
             observations.append(
-                Observation(ticker, "yes", float(yes_ask), result == "yes", minutes)
+                Observation(ticker, "yes", float(yes_ask), result == "yes", minutes, contracts)
             )
         # Buying NO lifts the no ask, which is 1 - the yes bid.
         yes_bid = row.get("yes_bid")
         if yes_bid is not None:
             no_ask = 1.0 - float(yes_bid)
             if min_price <= no_ask < max_price:
-                observations.append(Observation(ticker, "no", no_ask, result == "no", minutes))
+                observations.append(
+                    Observation(ticker, "no", no_ask, result == "no", minutes, contracts)
+                )
     return observations
 
 
