@@ -54,9 +54,19 @@ class CryptoIndexFeed:
         amount = float(response.json()["data"]["amount"])
         return PriceTick(symbol=symbol, price=amount, timestamp=time.time())
 
-    async def run_forever(self) -> None:
+    async def run_forever(self, *, report_every: float = 60.0) -> None:
+        """Poll forever, reporting how many ticks were lost.
+
+        Dropped ticks are not cosmetic: a settlement window with no ticks cannot be evaluated at
+        all, so a silently degraded feed removes markets from analysis while looking like those
+        markets simply had no signal. The periodic summary makes a degraded feed obvious while it
+        is happening rather than days later.
+        """
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=5.0)
+        attempted = 0
+        failed = 0
+        last_report = time.monotonic()
         try:
             while True:
                 start = time.monotonic()
@@ -64,8 +74,18 @@ class CryptoIndexFeed:
                     *(self._fetch_price(client, symbol) for symbol in self._symbols),
                     return_exceptions=True,
                 )
+                attempted += len(self._symbols)
+                if start - last_report >= report_every:
+                    loss = failed / attempted if attempted else 0.0
+                    log = logger.warning if loss > 0.05 else logger.info
+                    log(
+                        "index feed: %d/%d ticks lost (%.1f%%) over the last %.0fs",
+                        failed, attempted, loss * 100, start - last_report,
+                    )
+                    attempted, failed, last_report = 0, 0, start
                 for symbol, result in zip(self._symbols, results):
                     if isinstance(result, Exception):
+                        failed += 1
                         logger.warning("Failed to fetch price for %s: %s", symbol, result)
                         continue
                     self._buffers[symbol].append(result)
