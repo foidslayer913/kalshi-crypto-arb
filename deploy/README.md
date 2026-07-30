@@ -1,5 +1,30 @@
 # Running the capture 24/7 on macOS
 
+## Moving from another machine
+
+Almost everything is in git. Three things are not, and only one of them matters.
+
+| item | how | why |
+| --- | --- | --- |
+| code | `git clone` | all of it |
+| `.env` | retype, ~10 lines | gitignored; **paths change** (`C:\Users\...` becomes `/Users/...`) |
+| private key | copy the file, or generate a fresh Live key | gitignored, and never committed |
+| `captures/` | **copy this** | gitignored and *irreplaceable* — Kalshi publishes no historical order books, so a lost capture is gone permanently |
+| `data/*.csv`, `*.jsonl` | optional | all re-fetchable in about half an hour |
+
+Then verify the machine before trusting it:
+
+```bash
+python -m scripts.check_setup
+```
+
+It checks the Python version, dependencies, `.env`, that the private key parses, that a *signed*
+request to Kalshi actually succeeds (the only check that proves the key matches the environment —
+a Demo key returns 401 against Live), that the backfill sources are reachable, and that the capture
+directory is writable with room to grow. Exit code is non-zero on failure, so it also works as a
+gate in a script.
+
+
 For a dataset, uptime *is* the product: Kalshi publishes no historical order books, so any hour the
 capture is down is an hour that cannot be recovered later. A laptop that sleeps is the wrong host; a
 machine that stays on with a supervised service is the right one.
