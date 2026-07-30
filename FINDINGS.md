@@ -5,7 +5,7 @@ Reproduction commands are at the end. Dates refer to July 2026.
 
 ## Summary
 
-Five strategy variants were tested. All five fail, and they fail for one underlying reason:
+Six strategy variants were tested. All six fail, and they fail for one underlying reason:
 
 > **The cost of crossing the spread exceeds the market's pricing error.**
 
@@ -121,6 +121,40 @@ falling to 71¢ is the market correctly repricing a 2σ index move, and 71¢ is 
 71¢ contracts win about 72% of the time whether or not they just collapsed. Treating the prior 96¢
 as evidence of value anchors on a price the index has already invalidated.
 
+## 6. Index velocity — real information, already priced
+
+Level and trend are different information, and the conditional study used only level. Adding the
+index's standardised velocity as a second model dimension produces a clean dose-response:
+
+| slope lookback | held-out model MAE | vs level only (0.4293) |
+| --- | --- | --- |
+| 1 minute | 0.4317 | −0.0024 (worse) |
+| 3 minutes | 0.4234 | **+0.0058** |
+| 5 minutes | 0.4180 | **+0.0113** |
+
+So **short-horizon momentum in BTC is real** — velocity over 3–5 minutes genuinely predicts the
+settlement beyond where the index currently sits, and the effect grows with the lookback. For a
+driftless random walk this would be exactly zero, so it is a substantive finding about the
+underlying.
+
+It is not tradeable, because the market already knows it and much more:
+
+| predictor | held-out MAE (per observation) |
+| --- | --- |
+| level only | 0.4293 |
+| level + 5-minute velocity | 0.4180 |
+| **market price** | **0.3439** |
+
+The market leads the best model by **0.0741** per observation. The best feature found is worth
+0.0113, so closing that gap would take roughly six more discoveries of equal size. Every divergence
+bucket remains negative at every lookback tested.
+
+This is the third independent confirmation of one thing: every signal added — price level, index
+level, price momentum, index velocity — is already in the price. The market is not merely calibrated;
+it is incorporating information this model structurally lacks (the actual CF Benchmarks BRTI rather
+than a Binance proxy, order flow, and other participants' information). Beating it would require
+information the market does not have, not better use of the same inputs.
+
 ## What remains open
 
 **Sub-minute dislocation.** Every price study here samples 1-minute candle *closes*. Within a single
@@ -192,6 +226,10 @@ python -m backtest conditional --observations data/calibration.jsonl \
 
 # 5: does a violent move overshoot? (prints both halves for replication)
 python -m backtest reaction --observations data/calibration.jsonl --train-end 2026-07-15
+
+# 6: does index velocity add anything beyond level?
+python -m backtest conditional --observations data/calibration.jsonl \
+    --index data/BTC-USD-1m.csv --train-end 2026-07-15 --slope-lookback 5
 ```
 
 `python -m backtest conditional` prints a warning if the learned `P(win | z)` table is not monotone

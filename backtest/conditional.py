@@ -378,16 +378,37 @@ def format_model(model: FairModel) -> str:
     ]
     for low, high, samples, rate in model.table():
         lines.append(f"{f'{low:+.2f} to {high:+.2f}':<16}{samples:>9}{rate:>10.3f}")
-    rates = [rate for *_, rate in model.table()]
-    if len(rates) >= 2:
-        monotone = all(a <= b + 0.05 for a, b in zip(rates, rates[1:]))
+    rows = model.table()
+    if len(rows) >= 4:
+        # Compare the well-populated low-z and high-z ends rather than requiring every adjacent pair
+        # to be ordered. Extreme-tail cells hold a few dozen samples, so pairwise checks fire on
+        # ordinary sampling noise and cry wolf on a perfectly usable coordinate.
+        total = sum(samples for *_, samples, _ in rows)
+        weighted = sorted(rows, key=lambda row: row[0])
+        cumulative = 0
+        low_rates: list[tuple[int, float]] = []
+        high_rates: list[tuple[int, float]] = []
+        for low, _high, samples, rate in weighted:
+            cumulative += samples
+            if cumulative <= total / 3:
+                low_rates.append((samples, rate))
+            elif cumulative >= total * 2 / 3:
+                high_rates.append((samples, rate))
         lines.append("")
-        lines.append(
-            "Win rate rises with z as it should — the coordinate is informative."
-            if monotone
-            else "WARNING: win rate is not rising with z. The coordinate may be mis-signed or the "
-            "volatility estimate wrong; nothing downstream is trustworthy until this is monotone."
-        )
+        if low_rates and high_rates:
+            low = sum(s * r for s, r in low_rates) / sum(s for s, _ in low_rates)
+            high = sum(s * r for s, r in high_rates) / sum(s for s, _ in high_rates)
+            if high - low > 0.10:
+                lines.append(
+                    f"Win rate rises with z as it should ({low:.3f} in the bottom third of z, "
+                    f"{high:.3f} in the top third) — the coordinate is informative."
+                )
+            else:
+                lines.append(
+                    f"WARNING: win rate barely rises with z ({low:.3f} -> {high:.3f}). The "
+                    "coordinate may be mis-signed or the volatility estimate wrong; nothing "
+                    "downstream is trustworthy until this separates."
+                )
     return "\n".join(lines)
 
 

@@ -293,3 +293,34 @@ def test_mean_absolute_error_shows_the_market_winning_when_the_price_already_kno
     model = FairModel(width=0.5, min_samples=40, slope_width=1.0).fit(train)
     model_mae, market_mae, _ = mean_absolute_error(model, test)
     assert market_mae <= model_mae + 0.01  # the price is at least as good as the model
+
+
+def test_monotonicity_check_is_not_fooled_by_thin_tail_noise():
+    # A well-behaved coordinate whose extreme tail cells are noisy must still pass. The pairwise
+    # version of this check fired on exactly this shape and told the user to distrust good output.
+    from backtest.conditional import format_model
+
+    train = (
+        _synthetic(90, 0.5, 0.135, -2.4, "2026-07-01", 61)   # thin, noisy tail
+        + _synthetic(215, 0.5, 0.070, -2.1, "2026-07-01", 62)  # thin, out of order vs above
+        + _synthetic(2000, 0.5, 0.30, -1.0, "2026-07-01", 63)
+        + _synthetic(3000, 0.5, 0.50, 0.0, "2026-07-01", 64)
+        + _synthetic(2000, 0.5, 0.75, 1.0, "2026-07-01", 65)
+        + _synthetic(500, 0.5, 0.93, 2.0, "2026-07-01", 66)
+    )
+    output = format_model(FairModel(width=0.25, min_samples=40).fit(train))
+    assert "rises with z as it should" in output
+    assert "WARNING" not in output
+
+
+def test_monotonicity_check_still_warns_on_a_useless_coordinate():
+    from backtest.conditional import format_model
+
+    train = (
+        _synthetic(2000, 0.5, 0.50, -1.5, "2026-07-01", 71)
+        + _synthetic(2000, 0.5, 0.51, -0.5, "2026-07-01", 72)
+        + _synthetic(2000, 0.5, 0.49, 0.5, "2026-07-01", 73)
+        + _synthetic(2000, 0.5, 0.50, 1.5, "2026-07-01", 74)
+    )
+    output = format_model(FairModel(width=0.25, min_samples=40).fit(train))
+    assert "WARNING" in output
