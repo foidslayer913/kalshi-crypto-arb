@@ -146,13 +146,16 @@ def _print_table(markets: list[dict]) -> None:
             strike = market.get("cap_strike")
         timer = market.get("settlement_timer_seconds")
         timers.add(timer)
+        # Volume arrives as `volume_fp`, a fixed-point string; reading a plain `volume` key finds
+        # nothing and renders every market as untraded.
+        volume = market.get("volume_fp", market.get("volume", "-"))
         print(
             f"{market.get('ticker', '?'):<34}"
             f"{market.get('status', '?'):>9}"
             f"{str(market.get('strike_type', '-')):>9}"
             f"{('-' if strike is None else str(strike)):>12}"
             f"{str(timer if timer is not None else '-'):>8}"
-            f"{str(market.get('volume', '-')):>8}"
+            f"{str(volume):>8}"
             f"{str(market.get('close_time', '-')):>22}"
         )
     print(f"\n{len(markets)} market(s).")

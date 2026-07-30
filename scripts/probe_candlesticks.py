@@ -22,7 +22,19 @@ from pathlib import Path
 
 import httpx
 
-from scripts.fetch_ground_truth import KALSHI_PROD_MARKET_DATA, _get, iter_settled_markets
+from scripts.fetch_ground_truth import (
+    KALSHI_PROD_MARKET_DATA,
+    VOLUME_KEYS,
+    _first_number,
+    _get,
+    iter_settled_markets,
+)
+
+
+def _volume(market: dict) -> float:
+    """Traded contracts. Kalshi reports this as `volume_fp` (a fixed-point string); reading a plain
+    `volume` key finds nothing and makes every market look untraded."""
+    return _first_number(market, VOLUME_KEYS) or 0.0
 
 # Documented shape; probed rather than trusted, which is how the order book schema turned out wrong.
 CANDLESTICK_PATH = "/series/{series}/markets/{ticker}/candlesticks"
@@ -43,7 +55,7 @@ def _pick_market(markets_path: Path, prefer_traded: bool = True) -> dict:
             if not line:
                 continue
             record = json.loads(line)
-            if prefer_traded and float(record.get("volume") or 0) <= 0:
+            if prefer_traded and _volume(record) <= 0:
                 continue
             candidates.append(record)
             if len(candidates) >= 50:
@@ -53,7 +65,7 @@ def _pick_market(markets_path: Path, prefer_traded: bool = True) -> dict:
             f"No traded markets found in {markets_path}. Re-run with --ticker to probe one directly."
         )
     # The busiest of the sample gives the best chance of a populated series.
-    return max(candidates, key=lambda record: float(record.get("volume") or 0))
+    return max(candidates, key=_volume)
 
 
 STRUCTURE_KEYS = (
@@ -85,13 +97,17 @@ def pick_from_series(series_ticker: str, lookback_hours: float, limit: int = 400
             f"No settled markets for series {series_ticker!r} in the last {lookback_hours:.0f}h. "
             "Try a longer --lookback-hours, or check the series ticker."
         )
-    traded = [m for m in candidates if float(m.get("volume") or 0) > 0]
-    if not traded:
-        raise SystemExit(
-            f"{len(candidates)} settled {series_ticker} markets found but none traded — "
-            "no price history to probe."
-        )
-    return max(traded, key=lambda record: float(record.get("volume") or 0))
+    traded = [m for m in candidates if _volume(m) > 0]
+    if traded:
+        return max(traded, key=_volume)
+    # Volume is only a heuristic for "most likely to have populated history". The structural and
+    # candlestick-schema questions are still worth answering, so probe the latest market rather than
+    # giving up — an empty candle series is itself a useful answer.
+    print(
+        f"note: none of the {len(candidates)} recent settled {series_ticker} markets report volume; "
+        "probing the most recent one anyway.\n"
+    )
+    return max(candidates, key=lambda record: record.get("close_time", ""))
 
 
 def describe_structure(market: dict) -> None:
@@ -218,7 +234,7 @@ def main() -> None:
         ticker = market["ticker"]
         close_ts = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00")).timestamp()
         print(f"Probing busiest traded market from {source}: {ticker} "
-              f"(volume {market.get('volume')})\n")
+              f"(volume {_volume(market):.0f})\n")
         describe_structure(market)
 
     probe(ticker, close_ts, args.period, args.hours_before)
