@@ -110,6 +110,7 @@ class FillResult:
     net_yield_at_fire: float | None
     ask_at_close: float | None
     net_yield_at_close: float | None
+    strike_price: float = 0.0
     yes_bid_at_fire: int | None = None
     no_bid_at_fire: int | None = None
     ws_events: int = 0
@@ -197,6 +198,7 @@ def analyze_fills(
                 net_yield_at_fire=calculate_net_yield(ask_fire) if ask_fire is not None else None,
                 ask_at_close=ask_close,
                 net_yield_at_close=calculate_net_yield(ask_close) if ask_close is not None else None,
+                strike_price=market.strike_price,
                 yes_bid_at_fire=yes_bid,
                 no_bid_at_fire=no_bid,
                 ws_events=len(payloads),
@@ -215,21 +217,29 @@ def format_fill_debug(results: list[FillResult], limit: int = 20) -> str:
     """Per-market view to tell a one-sided book (real: winning side empty, other side full) from an
     empty one (a reconstruction/timing problem)."""
     nonempty = sum(1 for r in results if r.book_nonempty_at_fire)
-    header = f"{'ticker':<28}{'strike_side':>12}{'fire_s':>7}{'yes_bid':>8}{'no_bid':>8}{'ws':>8}{'ask':>7}"
+    # Show the most active markets first: those are the near-the-money strikes where two-sided
+    # liquidity — and the real fill question — actually live. Deep in/out-of-money strikes are
+    # inactive and trivially have no counterparty on the winning side.
+    ordered = sorted(results, key=lambda r: (r.book_nonempty_at_fire, r.ws_events), reverse=True)
+    header = (
+        f"{'ticker':<28}{'strike':>10}{'side':>5}{'fire_s':>7}"
+        f"{'yes_bid':>8}{'no_bid':>8}{'ws':>7}{'ask':>7}"
+    )
     lines = [
         f"fired markets with a non-empty book at fire: {nonempty}/{len(results)}",
         "(if this is ~0, signals are firing before the book was captured — a timing issue, not the market)",
+        "most-active markets first (near the money is where liquidity is):",
         "",
         header,
         "-" * len(header),
     ]
-    for r in results[:limit]:
+    for r in ordered[:limit]:
         ask = "-" if r.ask_at_fire is None else f"{r.ask_at_fire:.2f}"
         lines.append(
-            f"{r.ticker:<28}{r.side:>12}{r.fire_second:>7}"
+            f"{r.ticker:<28}{r.strike_price:>10.0f}{r.side:>5}{r.fire_second:>7}"
             f"{'-' if r.yes_bid_at_fire is None else r.yes_bid_at_fire:>8}"
             f"{'-' if r.no_bid_at_fire is None else r.no_bid_at_fire:>8}"
-            f"{r.ws_events:>8}{ask:>7}"
+            f"{r.ws_events:>7}{ask:>7}"
         )
     return "\n".join(lines)
 
