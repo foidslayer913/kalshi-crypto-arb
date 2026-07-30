@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Iterator
 
+from backtest.conditional import MinuteIndex
 from backtest.recorder import captured_markets, read_captures
 from ingestion.kalshi_rest import MarketInfo
 from ingestion.order_book import OrderBookStore
@@ -57,6 +58,9 @@ class Row:
 
 CSV_COLUMNS = [field.name for field in fields(Row)]
 
+LIVE_TICK_MAX_AGE_SECONDS = 5
+"""Beyond this a recorded tick is stale enough that the backfilled series is the better answer."""
+
 
 def _mid(yes_bid: int | None, yes_ask: int | None) -> float | None:
     if yes_bid is None or yes_ask is None:
@@ -69,11 +73,19 @@ def build_rows(
     *,
     within_minutes: float = 20.0,
     index_symbol_for: dict[str, str] | None = None,
+    index_backfill: dict[str, "MinuteIndex"] | None = None,
 ) -> Iterator[Row]:
     """Replay a capture and yield one row per market per second inside its pre-close window.
 
     The replay walks the merged log forward in arrival order, applying order book messages and index
     ticks as they land, and emits a snapshot whenever the wall clock crosses a second boundary.
+
+    `index_backfill` supplies a historical index series per symbol, used whenever no live tick is
+    recent enough. The live crypto feed is rate-limited and in practice drops most of its ticks, so
+    relying on it alone leaves the index column almost entirely empty; the index is public and
+    reconstructable after the fact, unlike the order book, so backfilling it costs nothing in
+    fidelity. A live tick still wins when it is fresh, being both finer-grained and genuinely what
+    the process saw.
     """
     index_symbol_for = index_symbol_for or {"KXBTC": "BTC-USD", "KXETH": "ETH-USD"}
     markets: dict[str, MarketInfo] = {m.ticker: m for m in captured_markets(directory)}
@@ -81,7 +93,7 @@ def build_rows(
         return
 
     store = OrderBookStore()
-    latest_index: dict[str, float] = {}
+    latest_index: dict[str, tuple[int, float]] = {}
     last_change: dict[str, int] = {}
     current_second: int | None = None
 
@@ -104,7 +116,15 @@ def build_rows(
             if yes_bid is None and no_bid is None:
                 continue  # never quoted; an empty row would imply a book we never saw
             symbol = symbol_for(ticker)
-            index_price = latest_index.get(symbol) if symbol else None
+            index_price = None
+            if symbol:
+                live = latest_index.get(symbol)
+                # A live tick is preferred while it is fresh; past that it is a stale quote dressed
+                # up as a current one, and the backfill is the more honest answer.
+                if live is not None and second - live[0] <= LIVE_TICK_MAX_AGE_SECONDS:
+                    index_price = live[1]
+                elif index_backfill and symbol in index_backfill:
+                    index_price = index_backfill[symbol].price_at(second, max_staleness=90.0)
             distance = (
                 (index_price - market.strike_price) / market.strike_price * 100.0
                 if index_price and market.strike_price
@@ -139,7 +159,7 @@ def build_rows(
             current_second += 1
 
         if event.kind == "tick":
-            latest_index[event.data["symbol"]] = float(event.data["price"])
+            latest_index[event.data["symbol"]] = (second, float(event.data["price"]))
             continue
         payload = event.data.get("payload", {})
         ticker = payload.get("msg", {}).get("market_ticker")

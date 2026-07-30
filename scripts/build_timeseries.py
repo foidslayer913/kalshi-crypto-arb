@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from backtest.conditional import MinuteIndex
 from dataset.timeseries import build_rows, write_csv
 
 
@@ -24,9 +25,23 @@ def main() -> None:
         help="Only emit rows for markets this close to settling (default 20). Every open strike "
              "every second would be tens of millions of rows of mostly-static book.",
     )
+    parser.add_argument(
+        "--index", action="append", default=None, metavar="SYMBOL=PATH",
+        help="Backfill the index column from a 1m series (scripts/fetch_index_minutes). Repeatable. "
+             "The live crypto feed is rate-limited and drops most ticks, so without this the index "
+             "column is mostly empty.",
+    )
     args = parser.parse_args()
 
-    rows = build_rows(args.dir, within_minutes=args.within_minutes)
+    backfill = {}
+    for entry in args.index or []:
+        symbol, _, path = entry.partition("=")
+        if not path:
+            raise SystemExit(f"--index expects SYMBOL=PATH, got {entry!r}")
+        backfill[symbol] = MinuteIndex.from_csv(path)
+        print(f"Backfilling {symbol} from {path} ({len(backfill[symbol])} minutes)")
+
+    rows = build_rows(args.dir, within_minutes=args.within_minutes, index_backfill=backfill or None)
     written = write_csv(rows, args.out)
     if written == 0:
         raise SystemExit(

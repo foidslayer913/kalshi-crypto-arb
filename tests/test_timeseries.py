@@ -135,3 +135,53 @@ def test_csv_round_trips_with_a_stable_header(tmp_path):
     assert int(parsed[0]["yes_ask"]) == 55
     # A consumer depends on these names; changing them silently breaks them.
     assert set(parsed[0]) >= {"t", "ticker", "seconds_to_close", "yes_bid", "yes_ask", "mid", "strike"}
+
+
+def test_backfill_fills_the_index_where_live_ticks_are_missing(tmp_path):
+    # The live crypto feed drops ~97% of ticks in practice, leaving the column near-empty. Backfill
+    # from a historical series is the fix, and it must actually populate rows with no live tick.
+    from backtest.conditional import MinuteIndex
+
+    directory = _capture(tmp_path, [
+        {"t": CLOSE_TS - 100, "kind": "ws", "payload": _snapshot(TICKER, yes=[[40, 10]], no=[[45, 20]])},
+        {"t": CLOSE_TS - 90, "kind": "ws", "payload": _snapshot(TICKER, yes=[[41, 10]], no=[[45, 20]])},
+    ], strike=64000.0)
+
+    without = list(build_rows(directory))
+    assert all(row.index_price is None for row in without)
+
+    index = MinuteIndex([(CLOSE_TS - 120, 64640.0), (CLOSE_TS - 60, 64700.0)])
+    with_backfill = list(build_rows(directory, index_backfill={"BTC-USD": index}))
+    assert all(row.index_price is not None for row in with_backfill)
+    assert with_backfill[0].index_distance_pct == pytest.approx(1.0)
+
+
+def test_a_fresh_live_tick_beats_the_backfill(tmp_path):
+    # The live tick is finer-grained and is genuinely what the process saw, so it wins while fresh.
+    from backtest.conditional import MinuteIndex
+
+    directory = _capture(tmp_path, [
+        {"t": CLOSE_TS - 100, "kind": "tick", "symbol": "BTC-USD", "price": 65000.0, "ts": CLOSE_TS - 100},
+        {"t": CLOSE_TS - 99, "kind": "ws", "payload": _snapshot(TICKER, yes=[[40, 10]], no=[[45, 20]])},
+        {"t": CLOSE_TS - 97, "kind": "ws", "payload": _snapshot(TICKER, yes=[[40, 10]], no=[[45, 20]])},
+    ], strike=64000.0)
+    index = MinuteIndex([(CLOSE_TS - 120, 60000.0), (CLOSE_TS - 60, 60000.0)])
+    rows = list(build_rows(directory, index_backfill={"BTC-USD": index}))
+    assert rows[0].index_price == pytest.approx(65000.0)  # the live tick, not the 60000 backfill
+
+
+def test_a_stale_live_tick_yields_to_the_backfill(tmp_path):
+    # Past the freshness window a recorded tick is a stale quote dressed as a current one.
+    from backtest.conditional import MinuteIndex
+    from dataset.timeseries import LIVE_TICK_MAX_AGE_SECONDS
+
+    directory = _capture(tmp_path, [
+        {"t": CLOSE_TS - 200, "kind": "tick", "symbol": "BTC-USD", "price": 65000.0, "ts": CLOSE_TS - 200},
+        {"t": CLOSE_TS - 100, "kind": "ws", "payload": _snapshot(TICKER, yes=[[40, 10]], no=[[45, 20]])},
+        {"t": CLOSE_TS - 98, "kind": "ws", "payload": _snapshot(TICKER, yes=[[40, 10]], no=[[45, 20]])},
+    ], strike=64000.0)
+    index = MinuteIndex([(CLOSE_TS - 120, 64640.0), (CLOSE_TS - 60, 64640.0)])
+    rows = list(build_rows(directory, index_backfill={"BTC-USD": index}))
+    stale_by = (CLOSE_TS - 100) - (CLOSE_TS - 200)
+    assert stale_by > LIVE_TICK_MAX_AGE_SECONDS
+    assert rows[0].index_price == pytest.approx(64640.0)  # backfill wins
