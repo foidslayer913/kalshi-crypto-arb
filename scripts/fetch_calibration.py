@@ -111,11 +111,22 @@ def observations_for_market(
             "minutes_to_close": round((close_ts - float(end_ts)) / 60.0, 3),
             "yes_ask": yes_ask,
             "yes_bid": yes_bid,
+            # Open/low/high as well as the close. The open of a market's first candle is its opening
+            # quote, which is the only way to test a rule that fires at the open; the low bounds what
+            # a faster participant could have paid inside the minute.
+            "yes_ask_open": _dollars(candle.get("yes_ask"), "open_dollars"),
+            "yes_ask_low": _dollars(candle.get("yes_ask"), "low_dollars"),
+            "yes_ask_high": _dollars(candle.get("yes_ask"), "high_dollars"),
+            "yes_bid_open": _dollars(candle.get("yes_bid"), "open_dollars"),
+            "yes_bid_low": _dollars(candle.get("yes_bid"), "low_dollars"),
+            "yes_bid_high": _dollars(candle.get("yes_bid"), "high_dollars"),
             "trade_price": _dollars(candle.get("price")),
+            "trade_open": _dollars(candle.get("price"), "open_dollars"),
             "candle_volume": _first_number(candle, VOLUME_KEYS),
             "strike": strike,
             "expiration_value": expiration_value,
             "close_time": close_iso,
+            "open_time": open_iso,
         }
 
 

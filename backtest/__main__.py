@@ -39,6 +39,9 @@ from backtest.conditional import (
     mean_absolute_error,
     split_by_date,
 )
+from backtest.opening import format_sweep as format_opening_sweep
+from backtest.opening import opening_quotes
+from backtest.opening import split_by_date as split_opening
 from backtest.reaction import bucket_by_move, format_moves, format_verdict
 from backtest.reaction import build_observations as build_reaction
 from backtest.reaction import split_by_date as split_reaction
@@ -150,6 +153,17 @@ def _parse_args() -> argparse.Namespace:
         "--train-end", default=None,
         help="Split date. Given, the same table is printed for both halves so an effect can be "
              "checked for replication (YYYY-MM-DD).",
+    )
+
+    opening = subparsers.add_parser(
+        "opening",
+        help="Is a side that opens cheap actually underpriced? (tests the ~50/50-at-open premise)",
+    )
+    opening.add_argument("--observations", required=True, help="JSONL from scripts/fetch_calibration")
+    opening.add_argument("--contracts", type=int, default=100)
+    opening.add_argument(
+        "--train-end", default=None,
+        help="Split date; given, prints the threshold sweep for both halves (YYYY-MM-DD).",
     )
 
     return parser.parse_args()
@@ -329,6 +343,28 @@ def _run_reaction(args: argparse.Namespace) -> None:
         print(format_verdict(buckets))
 
 
+def _run_opening(args: argparse.Namespace) -> None:
+    quotes = opening_quotes(args.observations)
+    have_open = [q for q in quotes if q.yes_ask_open is not None or q.yes_bid_open is not None]
+    if not have_open:
+        raise SystemExit(
+            "No opening quotes found. Re-fetch with the updated scripts/fetch_calibration, which now "
+            "records yes_ask_open / yes_bid_open."
+        )
+    print(f"{len(have_open)} markets with an opening quote\n")
+    if args.train_end:
+        train, test = split_opening(quotes, args.train_end)
+        print(format_opening_sweep(train, contracts=args.contracts,
+                                   label=f"FIRST half (<= {args.train_end})"))
+        print()
+        print(format_opening_sweep(test, contracts=args.contracts,
+                                   label=f"SECOND half (> {args.train_end})"))
+        print()
+        print("An effect present in one half only is noise. Both halves must agree.")
+    else:
+        print(format_opening_sweep(quotes, contracts=args.contracts))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _parse_args()
@@ -342,6 +378,8 @@ def main() -> None:
         _run_conditional(args)
     elif args.command == "reaction":
         _run_reaction(args)
+    elif args.command == "opening":
+        _run_opening(args)
     else:
         _run_capture(args)
 
