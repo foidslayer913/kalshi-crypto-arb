@@ -2,6 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Read FINDINGS.md first
+
+`FINDINGS.md` records what has been **measured against real Kalshi data**, and it supersedes the
+optimism in the roadmap below. Four strategy variants have been tested and all four fail, for one
+reason: the market's pricing error (**0.86 percentage points**) is smaller than the taker fee
+(**0.5–1.7¢**), which caps any information-based strategy at minute resolution regardless of model
+quality. Do not re-derive these results; extend them.
+
+Two live-data facts worth carrying into any new work:
+
+- **The wire schemas are now verified.** `order_book.py` was wrong (docs vs reality) and is fixed
+  against a real capture. `greater_or_equal` is the strike type these series actually use.
+- **Firing and liquidity are disjoint** in the daily strike ladder. Signals fire on decided
+  far-from-money strikes where nobody rests a bid on the losing side; the 386K captured deltas sat
+  in near-money strikes that never fire.
+
 ## Project state
 
 `SPEC.md` is the authoritative technical specification and should be read in full before writing any code. Phases 1-3 (ingestion, math engine + fee calculator, demo execution + telemetry) are implemented, and `main.py` wires them end-to-end: for each configured market ticker, `strategy/scanner.py`'s `SettlementArbScanner` fetches the market's strike/close time, feeds it ticks from `CryptoIndexFeed`, evaluates the settlement invariant, and calls `DemoTrader.place_order()` against live order book asks once a net-positive opportunity appears. There is no live Kalshi Demo account in this environment, so the WebSocket message schema in `ingestion/order_book.py` (and the REST market schema in `ingestion/kalshi_rest.py`) is implemented from Kalshi's documented API shape but has not been exercised against a real connection — treat it as the first thing to verify against a real Demo account.
