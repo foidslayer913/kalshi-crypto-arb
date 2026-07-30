@@ -15,6 +15,7 @@ the same tool can inspect Live books read-only. Credentials are still loaded fro
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -69,6 +70,17 @@ def list_markets(
     return markets
 
 
+def fetch_market(base_url: str, api_key_id: str, private_key: object, ticker: str) -> dict:
+    """Fetch one market's full raw payload. Used to check how a series expresses its strike and
+    settlement timer before assuming it matches the threshold markets the strategy was built on."""
+    path = f"{MARKETS_PATH}/{ticker}"
+    with httpx.Client(base_url=base_url, timeout=15.0) as client:
+        headers = auth_headers(private_key, api_key_id, "GET", path)
+        response = client.get(path, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+
 def fetch_orderbook(base_url: str, api_key_id: str, private_key: object, ticker: str) -> dict:
     """Fetch a single market's resting order book. This is where quote/depth actually lives — the
     markets list endpoint doesn't carry it. Answers whether there's anything to trade against."""
@@ -103,21 +115,38 @@ def _print_table(markets: list[dict]) -> None:
     if not markets:
         print("No markets returned.")
         return
-    header = f"{'ticker':<32}{'status':>10}{'strike':>12}{'yes_bid':>9}{'yes_ask':>9}{'vol':>8}{'close_time':>22}"
+    # settlement_timer_seconds is load-bearing: the settlement invariant assumes the payout is the
+    # index average over the final N seconds, and the math engine hardcodes N=60. A series with a
+    # different timer needs window_size driven from this field, not the default.
+    header = (
+        f"{'ticker':<34}{'status':>9}{'type':>9}{'strike':>12}"
+        f"{'timer_s':>8}{'vol':>8}{'close_time':>22}"
+    )
     print(header)
     print("-" * len(header))
+    timers: set = set()
     for market in markets:
-        strike = market.get("floor_strike") or market.get("cap_strike") or "-"
+        strike = market.get("floor_strike")
+        if strike is None:
+            strike = market.get("cap_strike")
+        timer = market.get("settlement_timer_seconds")
+        timers.add(timer)
         print(
-            f"{market.get('ticker', '?'):<32}"
-            f"{market.get('status', '?'):>10}"
-            f"{str(strike):>12}"
-            f"{str(market.get('yes_bid', '-')):>9}"
-            f"{str(market.get('yes_ask', '-')):>9}"
+            f"{market.get('ticker', '?'):<34}"
+            f"{market.get('status', '?'):>9}"
+            f"{str(market.get('strike_type', '-')):>9}"
+            f"{('-' if strike is None else str(strike)):>12}"
+            f"{str(timer if timer is not None else '-'):>8}"
             f"{str(market.get('volume', '-')):>8}"
             f"{str(market.get('close_time', '-')):>22}"
         )
     print(f"\n{len(markets)} market(s).")
+    print(f"settlement_timer_seconds seen: {sorted(t for t in timers if t is not None) or 'none reported'}")
+    if timers - {60, None}:
+        print(
+            "NOTE: a timer other than 60 means the settlement averaging window is not 60 seconds. "
+            "Pass --window-size <timer> to the backtest commands; the default assumes 60."
+        )
 
 
 def main() -> None:
@@ -138,10 +167,22 @@ def main() -> None:
         metavar="TICKER",
         help="Instead of listing, fetch one market's resting order book (real depth lives here).",
     )
+    parser.add_argument(
+        "--raw",
+        default=None,
+        metavar="TICKER",
+        help="Dump one market's full raw payload (check strike_type / settlement_timer_seconds).",
+    )
     args = parser.parse_args()
 
     base_url = args.base_url or (LIVE_BASE_URL if args.env == "live" else DEMO_BASE_URL)
     api_key_id, private_key = _load_credentials()
+
+    if args.raw:
+        print(f"Raw market payload for {args.raw} from {base_url}\n")
+        payload = fetch_market(base_url, api_key_id, private_key, args.raw)
+        print(json.dumps(payload, indent=2))
+        return
 
     if args.orderbook:
         print(f"Reading order book for {args.orderbook} from {base_url}\n")
