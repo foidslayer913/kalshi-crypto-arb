@@ -324,3 +324,30 @@ def test_monotonicity_check_still_warns_on_a_useless_coordinate():
     )
     output = format_model(FairModel(width=0.25, min_samples=40).fit(train))
     assert "WARNING" in output
+
+
+def test_settlement_average_variance_makes_z_more_extreme_near_close(tmp_path):
+    # Same index distance, 1 minute left: the settlement-average variance is smaller, so the
+    # standardised distance is LARGER (more confident) than under endpoint variance.
+    index_path, rows = _index_csv(tmp_path, minutes=600)
+    index = MinuteIndex.from_csv(index_path)
+    obs_path = _observations_file(tmp_path, rows, +0.005, "yes", count=1)  # index above strike
+
+    avg = build_observations(obs_path, index, min_price=0.0, settlement_average=True)
+    endpoint = build_observations(obs_path, index, min_price=0.0, settlement_average=False)
+    avg_yes = {o.minutes_to_close: o.z for o in avg if o.side == "yes"}
+    end_yes = {o.minutes_to_close: o.z for o in endpoint if o.side == "yes"}
+
+    # At 1 minute left the average-variance z is 1/sqrt(1/3) = 1.73x the endpoint z in magnitude,
+    # with the same sign (whichever side the index happens to be on).
+    assert abs(avg_yes[1.0]) > abs(end_yes[1.0])
+    assert avg_yes[1.0] / end_yes[1.0] == pytest.approx(1.732, abs=0.02)
+
+
+def test_max_minutes_restricts_to_the_endgame(tmp_path):
+    index_path, rows = _index_csv(tmp_path, minutes=600)
+    index = MinuteIndex.from_csv(index_path)
+    obs_path = _observations_file(tmp_path, rows, +0.0, "yes", count=3)
+    built = build_observations(obs_path, index, min_price=0.0, min_minutes=1.0, max_minutes=2.0)
+    assert built
+    assert all(o.minutes_to_close <= 2.0 for o in built)

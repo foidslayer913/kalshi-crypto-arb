@@ -122,6 +122,15 @@ def _parse_args() -> argparse.Namespace:
     )
     conditional.add_argument("--contracts", type=int, default=100)
     conditional.add_argument("--min-minutes", type=float, default=1.0)
+    conditional.add_argument(
+        "--max-minutes", type=float, default=None,
+        help="Restrict to observations at most this many minutes from close (e.g. 2 for the endgame).",
+    )
+    conditional.add_argument(
+        "--endpoint-variance", action="store_true",
+        help="Standardise with endpoint variance (sigma*sqrt(t)) instead of the settlement-average "
+             "variance. Run both to see whether the market misprices the 60-second averaging.",
+    )
     conditional.add_argument("--z-width", type=float, default=0.25, help="z bucket width for the model.")
     conditional.add_argument(
         "--min-samples", type=int, default=40, help="Minimum training samples for a z bucket to be used.",
@@ -255,12 +264,15 @@ def _run_calibration(args: argparse.Namespace) -> None:
 def _run_conditional(args: argparse.Namespace) -> None:
     index = MinuteIndex.from_csv(args.index)
     sigma = args.sigma if args.sigma is not None else index.sigma_per_minute()
-    print(f"index: {len(index)} minutes; sigma/minute = {sigma:.6f} ({sigma * 100:.4f}%)\n")
+    variance_kind = "endpoint sigma*sqrt(t)" if args.endpoint_variance else "settlement-average sigma*sqrt(t-2/3)"
+    window = f", <= {args.max_minutes} min to close" if args.max_minutes is not None else ""
+    print(f"index: {len(index)} minutes; sigma/minute = {sigma:.6f} ({sigma * 100:.4f}%)")
+    print(f"variance model: {variance_kind}{window}\n")
 
     observations = build_observations(
         args.observations, index, sigma_per_minute=sigma,
-        contracts=args.contracts, min_minutes=args.min_minutes,
-        slope_lookback=args.slope_lookback,
+        contracts=args.contracts, min_minutes=args.min_minutes, max_minutes=args.max_minutes,
+        slope_lookback=args.slope_lookback, settlement_average=not args.endpoint_variance,
     )
     if not observations:
         raise SystemExit(

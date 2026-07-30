@@ -147,9 +147,11 @@ def build_observations(
     sigma_per_minute: float | None = None,
     contracts: int = 100,
     min_minutes: float = 1.0,
+    max_minutes: float | None = None,
     min_price: float = 0.05,
     max_price: float = 0.995,
     slope_lookback: int = 0,
+    settlement_average: bool = True,
 ) -> list[ConditionalObservation]:
     """Join candle observations to the index and standardise the distance from the strike.
 
@@ -158,6 +160,14 @@ def build_observations(
 
     `slope_lookback > 0` additionally measures the index's velocity over that many minutes, in the
     same standardised units as `z`, so trend can be tested as information separate from level.
+
+    `settlement_average` controls the variance used to standardise the distance, and it is the whole
+    point near the close. Settlement is the average of the index over the final 60 seconds, whose
+    variance is `sigma^2 * (t - 2/3)` in per-minute units — not the endpoint's `sigma^2 * t`. At one
+    minute left the average's standard deviation is 0.58x the endpoint's, so treating settlement as a
+    point (the default a naive model — or a naive market — would use) overstates the remaining
+    uncertainty by 1.7x and prices favourites too cheap. Passing False restores the endpoint
+    variance, which is exactly the comparison that reveals whether the market makes this error.
     """
     sigma = sigma_per_minute if sigma_per_minute is not None else index.sigma_per_minute()
     built: list[ConditionalObservation] = []
@@ -167,6 +177,8 @@ def build_observations(
         result = row.get("result")
         minutes = float(row.get("minutes_to_close", 0.0))
         if strike is None or not close_time or result not in ("yes", "no") or minutes < min_minutes:
+            continue
+        if max_minutes is not None and minutes > max_minutes:
             continue
         strike = float(strike)
         if strike <= 0:
@@ -180,7 +192,12 @@ def build_observations(
         if spot is None or spot <= 0:
             continue
 
-        scale = sigma * math.sqrt(minutes)
+        # Variance of the settlement average vs the endpoint (see the docstring). For minutes >= 1
+        # the whole averaging window is in the future and (minutes - 2/3) is safely positive.
+        variance_minutes = (minutes - 2.0 / 3.0) if settlement_average else minutes
+        if variance_minutes <= 0:
+            continue
+        scale = sigma * math.sqrt(variance_minutes)
         if scale <= 0:
             continue
         z_yes = math.log(spot / strike) / scale
