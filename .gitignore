@@ -9,3 +9,6 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+
+# Service logs from a long-running capture (deploy/README.md)
+logs/

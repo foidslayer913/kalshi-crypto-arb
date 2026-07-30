@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd service for the read-only Kalshi capture.
+
+  KeepAlive restarts the process if it exits for any reason; RunAtLoad starts it at boot. Together
+  they mean the only way to lose data is the machine being off, which is the point: an unsupervised
+  capture that dies quietly at 3am costs a day of unrecoverable order book history.
+
+  Replace __HOME__ (the setup command in README.md does this with sed).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kalshi.capture</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/kalshi-crypto-arb/.venv/bin/python</string>
+        <string>capture_live.py</string>
+        <string>--series</string>
+        <string>KXBTC15M</string>
+        <string>--series</string>
+        <string>KXBTCD</string>
+        <string>--hours</string>
+        <string>2</string>
+        <string>--refresh-minutes</string>
+        <string>5</string>
+    </array>
+
+    <!-- capture_live.py resolves .env and captures/ relative to the working directory. -->
+    <key>WorkingDirectory</key>
+    <string>__HOME__/kalshi-crypto-arb</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Do not hammer Kalshi if the process is crash-looping on a bad config. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/kalshi-crypto-arb/logs/capture.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/kalshi-crypto-arb/logs/capture.err</string>
+</dict>
+</plist>
