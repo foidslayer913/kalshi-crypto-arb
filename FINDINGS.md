@@ -5,13 +5,26 @@ Reproduction commands are at the end. Dates refer to July 2026.
 
 ## Summary
 
-Four strategy variants were tested. All four fail, and they fail for one underlying reason:
+Five strategy variants were tested. All five fail, and they fail for one underlying reason:
 
-> **Kalshi's crypto markets price outcomes more accurately than the transaction cost.**
-> Measured pricing error is **0.86 percentage points**. The taker fee is **0.5–1.7¢** per contract.
+> **The cost of crossing the spread exceeds the market's pricing error.**
 
-That inequality caps *any* information-based strategy at minute resolution, regardless of how good
-the model is. It is the central result.
+Measured across 53,571 opportunities in 2,749 markets, the barrier decomposes as:
+
+| component | size |
+| --- | --- |
+| how far the **ask** sits above fair value | **0.44¢** |
+| **taker fee** | **1.16¢** |
+| total cost to buy at the ask | **1.60¢** |
+| the market's own pricing error | **0.86¢** |
+
+The decomposition is the important part. The ask is very nearly fair — the market is not
+mispricing anything worth taking — and **the fee, not the market's error, is the dominant term**.
+So the problem was never prediction quality. Every variant below paid ~1.6¢ to trade at roughly
+fair value, and no amount of model improvement can recover a cost that large.
+
+This is a *taker* result. It says nothing about resting orders, which is why market making is the
+one avenue left with different arithmetic (see "What remains open").
 
 ## 1. Strict settlement invariant — fails on timing
 
@@ -87,6 +100,27 @@ The setup that motivated this study — index 0.13% below the line, 5 minutes le
 The market was overpricing that side, not lagging. A 1.2-sigma move reads intuitively as
 near-certainty but is about 77%.
 
+## 5. Buying the dip — fails; sharp moves carry information
+
+Does a violent move overshoot, leaving the price too cheap right after? Distinct from the level
+question, and the only variant here about *dynamics*. Measured over 53,571 opportunities by the size
+of the bought side's price move over the preceding 2 minutes:
+
+**Every one of the 18 buckets, across both held-out halves, has a negative point estimate.** Not one
+positive, at any move size, in either period.
+
+After a drop of 25¢ or more — the exact scenario of a 96¢ contract collapsing to 71¢:
+
+| period | edge/contract | 95% CI |
+| --- | --- | --- |
+| Jul 1–15 | **−3.00¢** | −4.68 to −1.32 (significantly negative) |
+| Jul 16–30 | **−1.71¢** | −3.49 to +0.07 |
+
+Sharp moves **continue** rather than revert: the collapse was information, not panic. A 96¢ contract
+falling to 71¢ is the market correctly repricing a 2σ index move, and 71¢ is then roughly fair —
+71¢ contracts win about 72% of the time whether or not they just collapsed. Treating the prior 96¢
+as evidence of value anchors on a price the index has already invalidated.
+
 ## What remains open
 
 **Sub-minute dislocation.** Every price study here samples 1-minute candle *closes*. Within a single
@@ -95,9 +129,26 @@ this analysis and might be capturable live. Testing it needs the Tier 1 capture 
 order book parser now verified against the live feed). Prior is low: if price tracks truth to 0.86
 points on minute closes, systematic sub-minute room is thin and contested by faster participants.
 
-**Maker rebates.** If resting orders are materially cheaper than taking, the ~1¢ gross favourite
-bias could clear costs. Cuts against it: maker fills are adversely selected — you are filled when
-someone wants out, which correlates with the price moving against you.
+**Market making — the one avenue with different arithmetic.** This is the natural conclusion of the
+cost decomposition above, and the only idea here that stops fighting the market's accuracy and
+attacks the dominant term instead. Every variant tested pays 1.60¢ to cross: 1.16¢ of fee plus 0.44¢
+of ask. A resting bid inverts the second part — with the ~1¢ spread observed on these markets, you
+buy roughly 0.5¢ *below* mid instead of 0.44¢ above it, a swing close to 1¢ per trade, which is
+larger than any mispricing measured anywhere in this document.
+
+Two things decide whether it is real, and neither is known yet:
+
+1. **The maker fee.** If it is comparable to the taker fee the idea dies immediately. Check Kalshi's
+   schedule before building anything.
+2. **Adverse selection**, which is the actual risk and is measurable. A resting bid fills precisely
+   when someone wants to sell, which correlates with the price about to fall — so the spread earned
+   may be smaller than the losses on fills. This needs the Tier 1 capture: with the sub-second order
+   book recorded (`capture_live.py`, parser now verified), measure how the mid moves in the seconds
+   *after* a fill would have occurred at the resting price. That number, not the spread, decides it.
+
+Note the asymmetry that makes this worth measuring: the taker results are conclusive because the
+cost is deterministic and known. The maker case is genuinely open because its main cost —
+adverse selection — has never been measured here.
 
 ## Corrections made along the way
 
@@ -138,6 +189,9 @@ python -m backtest calibration --observations data/calibration.jsonl --contracts
 # 4: conditional index divergence, trained and tested on split dates
 python -m backtest conditional --observations data/calibration.jsonl \
     --index data/BTC-USD-1m.csv --train-end 2026-07-15
+
+# 5: does a violent move overshoot? (prints both halves for replication)
+python -m backtest reaction --observations data/calibration.jsonl --train-end 2026-07-15
 ```
 
 `python -m backtest conditional` prints a warning if the learned `P(win | z)` table is not monotone
