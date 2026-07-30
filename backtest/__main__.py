@@ -22,6 +22,12 @@ from backtest.reconstruct import (
     reconstruct,
     summarize,
 )
+from backtest.calibration import (
+    bucket_observations,
+    format_by_horizon,
+    format_calibration,
+    load_observations,
+)
 from backtest.recorder import capture_stats, format_stats
 from backtest.window_fills import (
     analyze_fills,
@@ -63,6 +69,22 @@ def _parse_args() -> argparse.Namespace:
     fills.add_argument(
         "--debug", action="store_true",
         help="Per-market breakdown (both best bids at fire) to tell a one-sided book from an empty one.",
+    )
+
+    calibration = subparsers.add_parser(
+        "calibration", help="Is the market's price a fair probability, and where is it wrong?"
+    )
+    calibration.add_argument("--observations", required=True, help="JSONL from scripts/fetch_calibration")
+    calibration.add_argument("--width", type=float, default=0.02, help="Price bucket width (default 2c).")
+    calibration.add_argument("--min-price", type=float, default=0.50)
+    calibration.add_argument("--max-price", type=float, default=0.995)
+    calibration.add_argument(
+        "--min-minutes", type=float, default=1.0,
+        help="Ignore candles closer than this to expiry (the final candle overlaps settlement).",
+    )
+    calibration.add_argument("--max-minutes", type=float, default=None)
+    calibration.add_argument(
+        "--min-markets", type=int, default=30, help="Buckets below this are reported as 'thin'.",
     )
 
     return parser.parse_args()
@@ -120,6 +142,31 @@ def _run_fills(args: argparse.Namespace) -> None:
         print(format_fill_debug(results))
 
 
+def _run_calibration(args: argparse.Namespace) -> None:
+    observations = load_observations(
+        args.observations,
+        min_minutes=args.min_minutes,
+        max_minutes=args.max_minutes,
+        min_price=args.min_price,
+        max_price=args.max_price,
+    )
+    if not observations:
+        raise SystemExit(
+            f"No observations in range in {args.observations!r}. Widen --min-price/--max-price or "
+            "lower --min-minutes."
+        )
+    markets = len({observation.ticker for observation in observations})
+    print(
+        f"{len(observations)} tradeable observations across {markets} markets "
+        f"(prices {args.min_price}-{args.max_price}, >= {args.min_minutes} min to close)\n"
+    )
+    buckets = bucket_observations(observations, width=args.width)
+    print(format_calibration(buckets, min_markets=args.min_markets))
+    print()
+    print("Edge by time remaining:")
+    print(format_by_horizon(observations))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = _parse_args()
@@ -127,6 +174,8 @@ def main() -> None:
         _run_signal(args)
     elif args.command == "fills":
         _run_fills(args)
+    elif args.command == "calibration":
+        _run_calibration(args)
     else:
         _run_capture(args)
 
