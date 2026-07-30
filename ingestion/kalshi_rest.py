@@ -11,7 +11,13 @@ from ingestion.kalshi_auth import auth_headers, load_private_key
 
 MARKET_PATH_TEMPLATE = "/trade-api/v2/markets/{ticker}"
 
-StrikeType = Literal["greater", "less"]
+# Kalshi's up/down series (e.g. KXBTC15M) report `greater_or_equal`, where the strike is the index
+# average at the period open. The inclusive/exclusive distinction is economically irrelevant here
+# (exact equality has probability ~0), but the variants must be recognised or the strike cannot be
+# read and the winning side is mapped backwards.
+StrikeType = Literal["greater", "greater_or_equal", "less", "less_or_equal"]
+ABOVE_STRIKE_TYPES = ("greater", "greater_or_equal")
+BELOW_STRIKE_TYPES = ("less", "less_or_equal")
 
 
 @dataclass(frozen=True)
@@ -24,14 +30,15 @@ class MarketInfo:
 
 def _parse_market(market: dict) -> MarketInfo:
     strike_type = market["strike_type"]
-    if strike_type == "greater":
+    if strike_type in ABOVE_STRIKE_TYPES:
         strike_price = market["floor_strike"]
-    elif strike_type == "less":
+    elif strike_type in BELOW_STRIKE_TYPES:
         strike_price = market["cap_strike"]
     else:
         raise ValueError(
             f"Unsupported strike_type for settlement arbitrage: {strike_type!r} "
-            f"(only single-sided 'greater'/'less' threshold markets are supported)"
+            f"(only single-sided threshold markets are supported: "
+            f"{', '.join(ABOVE_STRIKE_TYPES + BELOW_STRIKE_TYPES)})"
         )
     close_time = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
     return MarketInfo(

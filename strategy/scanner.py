@@ -8,7 +8,7 @@ from typing import Literal
 from clock import Clock, LiveClock
 from execution.demo_trader import BookQuote, DemoTrader
 from ingestion.crypto_feed import CryptoIndexFeed
-from ingestion.kalshi_rest import MarketInfo
+from ingestion.kalshi_rest import ABOVE_STRIKE_TYPES, BELOW_STRIKE_TYPES, MarketInfo
 from ingestion.order_book import OrderBookStore
 from strategy.fee_calculator import meets_yield_threshold
 from strategy.math_engine import SettlementWindow
@@ -40,17 +40,21 @@ def guaranteed_side(window: SettlementWindow, market: MarketInfo) -> Side | None
     """
     above = window.is_guaranteed_above(market.strike_price)
     below = window.is_guaranteed_below(market.strike_price)
-    if market.strike_type == "greater":
+    if market.strike_type in ABOVE_STRIKE_TYPES:
         if above:
             return "yes"
         if below:
             return "no"
         return None
-    if below:
-        return "yes"
-    if above:
-        return "no"
-    return None
+    if market.strike_type in BELOW_STRIKE_TYPES:
+        if below:
+            return "yes"
+        if above:
+            return "no"
+        return None
+    # Never guess the mapping: an unrecognised strike_type previously fell through to the "less"
+    # branch, which silently picks the losing side of an above-strike market.
+    raise ValueError(f"Cannot map strike_type {market.strike_type!r} to a winning side")
 
 
 @dataclass

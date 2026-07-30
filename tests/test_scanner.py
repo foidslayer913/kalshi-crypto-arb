@@ -13,7 +13,12 @@ from ingestion.crypto_feed import CryptoIndexFeed, PriceTick
 from ingestion.kalshi_rest import MarketInfo
 from ingestion.order_book import OrderBookStore
 from strategy.math_engine import relative_cap
-from strategy.scanner import ScannerConfig, SettlementArbScanner, resolve_crypto_symbol
+from strategy.scanner import (
+    ScannerConfig,
+    SettlementArbScanner,
+    guaranteed_side,
+    resolve_crypto_symbol,
+)
 from telemetry.logger import TelemetryLogger
 
 
@@ -193,3 +198,31 @@ def test_scanner_run_uses_injected_clock(demo_trader, tmp_path):
 
     assert real_elapsed < 2.0  # an hour of waiting plus a 60s window, simulated
     assert scanner.window.ticks_recorded == 60
+
+
+def test_greater_or_equal_maps_to_the_same_side_as_greater(demo_trader, tmp_path):
+    # KXBTC15M (up/down) reports strike_type "greater_or_equal". This used to fall through to the
+    # "less" branch, which picks the LOSING side of an above-strike market.
+    scanner, _, _, _ = _make_scanner(
+        demo_trader, tmp_path, strike_type="greater_or_equal", strike_price=50.0
+    )
+    for _ in range(60):
+        scanner._window.record_tick(100.0)  # floor average 100 >> strike 50
+    assert guaranteed_side(scanner._window, scanner._market) == "yes"
+
+
+def test_less_or_equal_maps_to_the_same_side_as_less(demo_trader, tmp_path):
+    scanner, _, _, _ = _make_scanner(
+        demo_trader, tmp_path, strike_type="less_or_equal", strike_price=200.0
+    )
+    for _ in range(60):
+        scanner._window.record_tick(0.0)  # ceiling average 0 << strike 200
+    assert guaranteed_side(scanner._window, scanner._market) == "yes"
+
+
+def test_unknown_strike_type_raises_rather_than_guessing(demo_trader, tmp_path):
+    scanner, _, _, _ = _make_scanner(demo_trader, tmp_path, strike_type="between", strike_price=50.0)
+    for _ in range(60):
+        scanner._window.record_tick(100.0)
+    with pytest.raises(ValueError, match="Cannot map strike_type"):
+        guaranteed_side(scanner._window, scanner._market)

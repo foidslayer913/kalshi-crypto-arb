@@ -123,20 +123,25 @@ def describe_structure(market: dict) -> None:
     if missing:
         print(f"  (absent from payload: {', '.join(missing)})")
 
-    timer = market.get("settlement_timer_seconds")
     strike_type = market.get("strike_type")
     print()
-    if timer is not None and timer != 60:
+    # The averaging window comes from the rules text, not settlement_timer_seconds — KXBTC15M
+    # reports timer=1 while its rules specify a sixty-second BRTI average. Treating the timer as the
+    # window would set window_size=1 and discard the entire settlement invariant.
+    rules = str(market.get("rules_primary", ""))
+    if "sixty seconds" in rules or "60 seconds" in rules:
+        print("  rules specify a SIXTY-SECOND average — the 60-tick window the math engine uses is correct.")
+        print(f"  (settlement_timer_seconds={market.get('settlement_timer_seconds')} is not the "
+              "averaging window; do not derive window_size from it.)")
+    elif market.get("settlement_timer_seconds") is not None:
         print(
-            f"  NOTE settlement_timer_seconds={timer}, not 60. The math engine's window is 60, so\n"
-            f"       backtests on this series need --window-size {timer}."
+            f"  Averaging window not stated in the rules excerpt; settlement_timer_seconds="
+            f"{market.get('settlement_timer_seconds')}. Read the full rules before trusting a window size."
         )
-    elif timer == 60:
-        print("  settlement_timer_seconds=60 — matches the 60-second window the math engine assumes.")
-    if strike_type not in ("greater", "less"):
+    if strike_type not in ("greater", "greater_or_equal", "less", "less_or_equal"):
         print(
-            f"  NOTE strike_type={strike_type!r} is not the greater/less shape kalshi_rest._parse_market\n"
-            f"       handles; this series needs its strike derived differently."
+            f"  NOTE strike_type={strike_type!r} is not a shape kalshi_rest._parse_market handles;\n"
+            f"       this series needs its strike derived differently."
         )
     print()
 
