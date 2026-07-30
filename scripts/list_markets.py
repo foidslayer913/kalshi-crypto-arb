@@ -81,6 +81,21 @@ def fetch_market(base_url: str, api_key_id: str, private_key: object, ticker: st
         return response.json()
 
 
+def list_markets_for_event(
+    base_url: str, api_key_id: str, private_key: object, event_ticker: str
+) -> list[dict]:
+    """Markets belonging to one event. A Kalshi URL exposes the *event* ticker
+    (kxbtc15m-26jul292030), while the strategy operates on the market tickers inside it, so a
+    ticker copied from the browser needs this hop to become useful."""
+    with httpx.Client(base_url=base_url, timeout=15.0) as client:
+        headers = auth_headers(private_key, api_key_id, "GET", MARKETS_PATH)
+        response = client.get(
+            MARKETS_PATH, headers=headers, params={"event_ticker": event_ticker, "limit": 1000}
+        )
+        response.raise_for_status()
+        return response.json().get("markets", [])
+
+
 def fetch_orderbook(base_url: str, api_key_id: str, private_key: object, ticker: str) -> dict:
     """Fetch a single market's resting order book. This is where quote/depth actually lives — the
     markets list endpoint doesn't carry it. Answers whether there's anything to trade against."""
@@ -180,7 +195,22 @@ def main() -> None:
 
     if args.raw:
         print(f"Raw market payload for {args.raw} from {base_url}\n")
-        payload = fetch_market(base_url, api_key_id, private_key, args.raw)
+        try:
+            payload = fetch_market(base_url, api_key_id, private_key, args.raw)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 404:
+                raise
+            # A ticker copied from a Kalshi URL is the event, not a market. Resolve it rather than
+            # making the caller guess the market naming scheme.
+            print(f"No market named {args.raw!r}; treating it as an event ticker.\n")
+            markets = list_markets_for_event(base_url, api_key_id, private_key, args.raw)
+            if not markets:
+                raise SystemExit(f"No markets found for event {args.raw!r} either.")
+            print(f"Markets in event {args.raw}:\n")
+            _print_table(markets)
+            print(f"\nFull payload of the first one ({markets[0].get('ticker')}):\n")
+            print(json.dumps(markets[0], indent=2))
+            return
         print(json.dumps(payload, indent=2))
         return
 
