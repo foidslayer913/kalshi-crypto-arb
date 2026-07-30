@@ -132,3 +132,62 @@ def test_buckets_are_split_by_price():
     assert len(buckets) == 2
     assert buckets[0].low == pytest.approx(0.90)
     assert buckets[1].low == pytest.approx(0.94)
+
+
+def test_pooling_detects_an_edge_too_small_for_any_single_bucket():
+    from backtest.calibration import pool
+    # A 1.5c edge spread over many prices: invisible per-bucket, visible pooled.
+    rng = random.Random(11)
+    observations = []
+    for i in range(1500):
+        price = rng.choice([0.79, 0.85, 0.91, 0.95])
+        breakeven = price + 0.007
+        won = rng.random() < (breakeven + 0.015)
+        observations.append(Observation(f"M{i}", "yes", price, won, 5.0, contracts=100))
+    result = pool(observations, "favourites")
+    assert result.edge > 0.005
+    assert result.significant is True
+
+
+def test_pooling_finds_nothing_in_a_fair_market():
+    from backtest.calibration import pool
+    rng = random.Random(12)
+    observations = []
+    for i in range(1500):
+        price = rng.choice([0.79, 0.85, 0.91, 0.95])
+        breakeven = price + 0.007
+        won = rng.random() < breakeven
+        observations.append(Observation(f"M{i}", "yes", price, won, 5.0, contracts=100))
+    assert pool(observations, "fair").significant is False
+
+
+def test_pooling_clusters_by_market_so_repeated_candles_do_not_shrink_the_interval():
+    from backtest.calibration import pool
+    # 30 markets, each contributing 15 correlated candles. Treating 450 observations as independent
+    # would understate the interval by roughly sqrt(15).
+    clustered = [
+        Observation(f"M{m}", "yes", 0.91, m % 3 != 0, float(minute), contracts=100)
+        for m in range(30) for minute in range(1, 16)
+    ]
+    spread = [
+        Observation(f"S{i}", "yes", 0.91, i % 3 != 0, 5.0, contracts=100)
+        for i in range(450)
+    ]
+    clustered_result = pool(clustered, "clustered")
+    spread_result = pool(spread, "spread")
+    assert clustered_result.observations == spread_result.observations == 450
+    assert clustered_result.markets == 30
+    assert spread_result.markets == 450
+    assert clustered_result.edge_se > spread_result.edge_se * 2
+
+
+def test_pooling_handles_a_single_market():
+    from backtest.calibration import pool
+    result = pool([Observation("ONE", "yes", 0.91, True, 5.0)], "one")
+    assert result.markets == 1
+    assert result.significant is False  # a single market can never be significant
+
+
+def test_pooling_empty_returns_none():
+    from backtest.calibration import pool
+    assert pool([], "none") is None

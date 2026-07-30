@@ -26,6 +26,7 @@ from backtest.calibration import (
     bucket_observations,
     format_by_horizon,
     format_calibration,
+    format_pooled,
     load_observations,
 )
 from backtest.recorder import capture_stats, format_stats
@@ -170,6 +171,8 @@ def _run_calibration(args: argparse.Namespace) -> None:
         f"(prices {args.min_price}-{args.max_price}, >= {args.min_minutes} min to close, "
         f"fees at {args.contracts} contracts/order)\n"
     )
+    print(format_pooled(observations))
+    print()
     buckets = bucket_observations(observations, width=args.width)
     print(format_calibration(buckets, min_markets=args.min_markets))
     print()

@@ -271,6 +271,118 @@ def format_calibration(buckets: list[Bucket], min_markets: int = 30) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class PooledResult:
+    """One hypothesis tested across a whole price range instead of bucket by bucket."""
+
+    label: str
+    observations: int
+    markets: int
+    mean_price: float
+    mean_breakeven: float
+    realized: float
+    edge: float
+    edge_se: float
+
+    @property
+    def edge_low(self) -> float:
+        return self.edge - 1.96 * self.edge_se
+
+    @property
+    def edge_high(self) -> float:
+        return self.edge + 1.96 * self.edge_se
+
+    @property
+    def significant(self) -> bool:
+        return self.edge_low > 0
+
+
+def pool(observations: list[Observation], label: str) -> PooledResult | None:
+    """Average expected profit per contract over a price range, with a cluster-robust interval.
+
+    Splitting a ~1c effect across twenty-five buckets tests each on a few hundred markets, where the
+    detection floor is several cents — so a real edge is invisible bucket by bucket no matter how
+    consistent it is. Pooling tests the pattern directly.
+
+    Two choices make the interval honest:
+
+    * Edge is measured per observation as `won - breakeven`, then **averaged within each market
+      first**. Observations from one market share an outcome, so treating them as independent would
+      shrink the interval by roughly the number of candles per market.
+    * The standard error comes from the spread *across markets*, which is the level at which
+      outcomes are actually independent.
+
+    Pooling assumes the per-contract edge is roughly constant in dollars across the range, which is
+    why it is worth running on sub-ranges rather than the whole book at once.
+    """
+    if not observations:
+        return None
+    per_market: dict[str, list[float]] = {}
+    for observation in observations:
+        edge = (1.0 if observation.won else 0.0) - observation.breakeven
+        per_market.setdefault(observation.ticker, []).append(edge)
+    market_edges = [sum(edges) / len(edges) for edges in per_market.values()]
+    n = len(market_edges)
+    mean_edge = sum(market_edges) / n
+    if n > 1:
+        variance = sum((edge - mean_edge) ** 2 for edge in market_edges) / (n - 1)
+        se = math.sqrt(variance / n)
+    else:
+        se = float("inf")
+    return PooledResult(
+        label=label,
+        observations=len(observations),
+        markets=n,
+        mean_price=sum(o.price for o in observations) / len(observations),
+        mean_breakeven=sum(o.breakeven for o in observations) / len(observations),
+        realized=sum(1 for o in observations if o.won) / len(observations),
+        edge=mean_edge,
+        edge_se=se,
+    )
+
+
+DEFAULT_POOL_RANGES: tuple[tuple[float, float], ...] = (
+    (0.50, 0.995),
+    (0.50, 0.78),
+    (0.78, 0.995),
+    (0.78, 0.90),
+    (0.90, 0.995),
+)
+
+
+def format_pooled(
+    observations: list[Observation], ranges: tuple[tuple[float, float], ...] = DEFAULT_POOL_RANGES
+) -> str:
+    lines = [
+        "Pooled edge by price range (the per-bucket view cannot see a 1c effect; this can).",
+        "Interval is cluster-robust: observations are averaged within a market first, because",
+        "candles from one market share one outcome.",
+        "",
+        f"{'price range':<16}{'obs':>8}{'mkts':>7}{'implied':>9}{'realized':>10}"
+        f"{'edge/contract':>15}{'95% CI':>20}{'verdict':>10}",
+    ]
+    lines.append("-" * len(lines[-1]))
+    for low, high in ranges:
+        group = [o for o in observations if low <= o.price < high]
+        result = pool(group, f"{low:.2f}-{high:.2f}")
+        if result is None:
+            continue
+        verdict = "SIGNIF" if result.significant else "no"
+        lines.append(
+            f"{result.label:<16}{result.observations:>8}{result.markets:>7}"
+            f"{result.mean_price:>9.3f}{result.realized:>10.3f}"
+            f"{result.edge:>+15.4f}"
+            f"{f'{result.edge_low:+.4f} to {result.edge_high:+.4f}':>20}"
+            f"{verdict:>10}"
+        )
+    lines.append("")
+    lines.append(
+        "A favourite-longshot bias shows up as a negative edge on the cheap side and a positive one "
+        "on the expensive side."
+    )
+    return "\n".join(lines)
+
+
 def format_by_horizon(
     observations: list[Observation], edges: tuple[float, ...] = (1, 2, 3, 5, 8, 15)
 ) -> str:
