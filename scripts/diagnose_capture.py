@@ -37,12 +37,14 @@ def main() -> None:
     first_t: float | None = None
     last_t: float | None = None
     tick_count = 0
+    tick_ts: dict[str, list[float]] = {}
 
     for event in read_captures(args.dir, kinds={"ws", "tick"}):
         first_t = event.t if first_t is None else min(first_t, event.t)
         last_t = event.t if last_t is None else max(last_t, event.t)
         if event.kind == "tick":
             tick_count += 1
+            tick_ts.setdefault(event.data["symbol"], []).append(event.data["ts"])
             continue
         payload = event.data["payload"]
         ticker = payload.get("msg", {}).get("market_ticker")
@@ -71,6 +73,36 @@ def main() -> None:
         f" ({(with_meta / total * 100) if total else 0:.1f}%)"
     )
     print("If that share is low, the fill analysis is scoring the quiet markets and ignoring the busy ones.")
+
+    # Index tick coverage. The bounds cannot be evaluated for a window with no ticks, so a hole in
+    # this feed silently removes markets from the fill analysis — which is indistinguishable from
+    # those markets having no liquidity unless the gaps are shown.
+    print("\nindex tick coverage (the settlement bounds need ~1 Hz here):")
+    for symbol, stamps in sorted(tick_ts.items()):
+        stamps.sort()
+        gaps = [(stamps[i + 1] - stamps[i], stamps[i]) for i in range(len(stamps) - 1)]
+        big = sorted((gap for gap in gaps if gap[0] > 5.0), reverse=True)[:5]
+        span = stamps[-1] - stamps[0] if len(stamps) > 1 else 0.0
+        expected = int(span) + 1
+        print(
+            f"  {symbol}: {len(stamps)} ticks over {span / 60:.1f} min "
+            f"({len(stamps) / expected * 100 if expected else 0:.0f}% of 1 Hz), "
+            f"{_iso(stamps[0])} .. {_iso(stamps[-1])}"
+        )
+        if big:
+            print(f"    largest gaps > 5s:")
+            for gap, at in big:
+                print(f"      {gap / 60:>6.1f} min starting {_iso(at)} UTC")
+
+    # Per-market-event window coverage: does each hourly close have ticks in its final 60 seconds?
+    print("\nsettlement-window tick coverage by close time:")
+    for close_iso in sorted({_iso(m.close_time.timestamp()) for m in captured_markets(args.dir)}):
+        close_dt = datetime.strptime(close_iso, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        close_ts = close_dt.timestamp()
+        for symbol, stamps in sorted(tick_ts.items()):
+            in_window = sum(1 for ts in stamps if close_ts - 60 <= ts <= close_ts)
+            flag = "OK" if in_window >= 30 else "GAP — markets here cannot be scored"
+            print(f"  {close_iso} {symbol}: {in_window}/60 ticks   {flag}")
 
     # Group metadata by close time so a multi-run capture's separate market sets are obvious.
     by_close: Counter[str] = Counter()
