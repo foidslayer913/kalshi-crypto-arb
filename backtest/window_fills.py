@@ -24,6 +24,7 @@ was *actually resting* at the fire instant, which is a venue-time fact. A latenc
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -142,11 +143,16 @@ def analyze_fills(
 
     ws_by_ticker: dict[str, list[dict]] = defaultdict(list)
     ticks_by_symbol: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    first_t: float | None = None
-    last_t: float | None = None
+    # Coverage needs two separate facts, and conflating them is how a zero-fill result gets faked:
+    #   1. per-ticker: we received this market's book state at or before the fire instant. A quiet
+    #      market with only an opening snapshot qualifies — no deltas means the book did not move.
+    #   2. globally: the process was still streaming at that instant, so silence means "no change"
+    #      rather than "we weren't listening". A capture spanning two runs has a gap between them,
+    #      and a window inside that gap is not covered no matter what the overall span says.
+    first_ws_by_ticker: dict[str, float] = {}
+    stream_activity: list[float] = []
     for event in read_captures(directory, kinds={"ws", "tick"}):
-        first_t = event.t if first_t is None else min(first_t, event.t)
-        last_t = event.t if last_t is None else max(last_t, event.t)
+        stream_activity.append(event.t)
         if event.kind == "tick":
             ticks_by_symbol[event.data["symbol"]].append((event.data["ts"], event.data["price"]))
         else:
@@ -154,8 +160,21 @@ def analyze_fills(
             ticker = payload.get("msg", {}).get("market_ticker")
             if ticker is not None:
                 ws_by_ticker[ticker].append(payload)
+                first_ws_by_ticker.setdefault(ticker, event.t)
 
     series_by_symbol = {symbol: PriceSeries(points) for symbol, points in ticks_by_symbol.items()}
+    stream_activity.sort()
+
+    def streaming_at(instant: float, max_gap: float = 30.0) -> bool:
+        """Whether the capture was actively recording at `instant`.
+
+        True when events surround it without a gap wider than `max_gap` — the process streams a
+        1 Hz index feed, so a longer silence means it was not running, not that nothing happened.
+        """
+        position = bisect_right(stream_activity, instant)
+        if position == 0 or position == len(stream_activity):
+            return False
+        return stream_activity[position] - stream_activity[position - 1] <= max_gap
 
     results: list[FillResult] = []
     skipped_uncaptured = 0
@@ -176,9 +195,11 @@ def analyze_fills(
 
         side: Side = signal.predicted
         fire_ts = close_ts - (window_size - signal.fire_second)
-        # Only score markets whose fire instant was actually recorded; one whose window fell outside
-        # the captured span would otherwise masquerade as "fired into an empty book".
-        if first_t is not None and last_t is not None and not (first_t <= fire_ts <= last_t):
+        # Only score a market whose book we actually knew at its fire instant, while still streaming.
+        # Without this, a market we never subscribed to reports "no ask" — indistinguishable from a
+        # real finding.
+        first_seen = first_ws_by_ticker.get(market.ticker)
+        if first_seen is None or first_seen > fire_ts or not streaming_at(fire_ts):
             skipped_uncaptured += 1
             continue
         close_minus_1 = close_ts - 1

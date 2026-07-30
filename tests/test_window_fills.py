@@ -93,6 +93,34 @@ def test_summarize_fills_counts_fillable(tmp_path):
     assert summary.median_net_yield_fillable == pytest.approx(0.04)
 
 
+def test_market_whose_window_falls_in_a_gap_between_runs_is_not_scored(tmp_path):
+    # The failure that produced a confident "0 fills": one capture file holding two runs. A market
+    # from run 1 whose window sits in the dead air before run 2 has no recorded book, and must be
+    # skipped rather than reported as having fired into an empty book.
+    directory = tmp_path / "captures"
+    directory.mkdir()
+    gap_ticker = "KXBTCD-26JUL2922-T50"
+    later_close = CLOSE_TS + 3600
+    lines = [
+        {
+            "t": CLOSE_TS - 3600, "kind": "market", "ticker": gap_ticker,
+            "strike_type": "greater", "strike_price": 50.0, "close_time": CLOSE.isoformat(),
+        },
+    ]
+    # Run 1: an hour before this market's window, then the process stops.
+    for i in range(30):
+        ts = CLOSE_TS - 3600 + i
+        lines.append({"t": ts, "kind": "tick", "symbol": "BTC-USD", "price": 100.0, "ts": ts})
+    lines.append({"t": CLOSE_TS - 3600, "kind": "ws", "payload": _snapshot(gap_ticker, no=[[5, 50]])})
+    # Run 2: starts an hour after, well past the market's settlement window.
+    for i in range(61):
+        ts = later_close - 60 + i
+        lines.append({"t": ts, "kind": "tick", "symbol": "BTC-USD", "price": 100.0, "ts": ts})
+    _write_capture(directory / "capture-2026-07-29.jsonl", lines)
+
+    assert analyze_fills(directory, Variant("strict"), window_size=60) == []
+
+
 def test_no_ask_when_book_empty_on_winning_side(tmp_path):
     directory = tmp_path / "captures"
     directory.mkdir()
