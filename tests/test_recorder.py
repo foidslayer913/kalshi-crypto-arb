@@ -266,3 +266,62 @@ def test_context_manager_flushes_on_exit(tmp_path):
     with _recorder(tmp_path) as recorder:
         recorder.record_ws({"seq": 1})
     assert len(list(read_captures(recorder.directory))) == 1
+
+
+def test_export_copies_only_completed_compressed_days(tmp_path):
+    # Splitting capture host from analysis machine: today's file is mid-append, and a sync client
+    # replicating it would hand the other machine a truncated final line.
+    from backtest.recorder import compress_completed_days, export_completed_days
+
+    directory = tmp_path / "captures"
+    directory.mkdir()
+    (directory / "capture-2026-07-29.jsonl").write_text('{"t": 1.0, "kind": "ws", "payload": {}}\n')
+    (directory / "capture-2026-07-30.jsonl").write_text('{"t": 2.0, "kind": "ws", "payload": {}}\n')
+    compress_completed_days(directory, today="2026-07-30")
+
+    export = tmp_path / "export"
+    copied = export_completed_days(directory, export)
+    names = sorted(path.name for path in copied)
+    assert names == ["capture-2026-07-29.jsonl.gz"]
+    assert not (export / "capture-2026-07-30.jsonl").exists()  # today's stays behind
+
+
+def test_export_is_idempotent(tmp_path):
+    from backtest.recorder import compress_completed_days, export_completed_days
+
+    directory = tmp_path / "captures"
+    directory.mkdir()
+    (directory / "capture-2026-07-29.jsonl").write_text('{"t": 1.0, "kind": "ws", "payload": {}}\n')
+    compress_completed_days(directory, today="2026-07-30")
+
+    export = tmp_path / "export"
+    assert len(export_completed_days(directory, export)) == 1
+    assert export_completed_days(directory, export) == []  # already there, not recopied
+
+
+def test_exported_day_is_still_readable(tmp_path):
+    from backtest.recorder import compress_completed_days, export_completed_days, read_captures
+
+    directory = tmp_path / "captures"
+    directory.mkdir()
+    (directory / "capture-2026-07-29.jsonl").write_text(
+        '{"t": 1.0, "kind": "ws", "payload": {"seq": 7}}\n'
+    )
+    compress_completed_days(directory, today="2026-07-30")
+    export = tmp_path / "export"
+    export_completed_days(directory, export)
+
+    events = list(read_captures(export))
+    assert [event.data["payload"]["seq"] for event in events] == [7]
+
+
+def test_export_leaves_no_partial_files_behind(tmp_path):
+    from backtest.recorder import compress_completed_days, export_completed_days
+
+    directory = tmp_path / "captures"
+    directory.mkdir()
+    (directory / "capture-2026-07-29.jsonl").write_text('{"t": 1.0, "kind": "ws", "payload": {}}\n')
+    compress_completed_days(directory, today="2026-07-30")
+    export = tmp_path / "export"
+    export_completed_days(directory, export)
+    assert list(export.glob("*.partial")) == []

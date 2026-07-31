@@ -185,6 +185,31 @@ def capture_files(directory: str | Path) -> list[Path]:
     )
 
 
+def export_completed_days(directory: str | Path, export_dir: str | Path) -> list[Path]:
+    """Copy finished, compressed day files into `export_dir`, skipping ones already there.
+
+    Exists so a capture host and an analysis machine can be different computers. Only *completed*
+    days are copied: the current day file is still being appended to, and a cloud-sync folder
+    replicating a half-written file hands the other machine a truncated final line. Compressed days
+    are immutable, so copying them is safe and idempotent.
+    """
+    directory, export_dir = Path(directory), Path(export_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for path in sorted(directory.glob(CAPTURE_GLOB_GZ)):
+        target = export_dir / path.name
+        if target.exists() and target.stat().st_size == path.stat().st_size:
+            continue
+        # Write to a temporary name first so a sync client never sees a partial file under the
+        # real name.
+        staging = target.with_suffix(target.suffix + ".partial")
+        shutil.copyfile(path, staging)
+        staging.replace(target)
+        copied.append(target)
+        logger.info("Exported %s -> %s", path.name, export_dir)
+    return copied
+
+
 def compress_completed_days(directory: str | Path, today: str | None = None) -> list[Path]:
     """Gzip finished day files, leaving today's alone because it is still being appended to.
 

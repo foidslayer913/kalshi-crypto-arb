@@ -34,7 +34,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from backtest.recorder import CaptureRecorder, compress_completed_days
+from backtest.recorder import CaptureRecorder, compress_completed_days, export_completed_days
 from ingestion.crypto_feed import CryptoIndexFeed, PriceTick
 from ingestion.kalshi_auth import load_private_key
 from ingestion.kalshi_rest import (
@@ -161,6 +161,7 @@ async def run_capture(
     max_markets: int,
     refresh_minutes: float = 10.0,
     heartbeat_minutes: float = 5.0,
+    export_dir: str | None = None,
 ) -> None:
     """Capture continuously, re-discovering markets as the series rolls over.
 
@@ -229,6 +230,9 @@ async def run_capture(
                 await refresh_markets()
                 # Yesterday's file is finished; compressing keeps a long run from filling the disk.
                 await asyncio.to_thread(compress_completed_days, capture_dir)
+                if export_dir:
+                    # Completed days only — the current file is mid-append and would sync truncated.
+                    await asyncio.to_thread(export_completed_days, capture_dir, export_dir)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -270,6 +274,11 @@ def main() -> None:
     parser.add_argument("--max-markets", type=int, default=150, help="Cap on markets subscribed, nearest close first.")
     parser.add_argument("--capture-dir", default=os.getenv("CAPTURE_DIR", "captures"))
     parser.add_argument(
+        "--export-dir", default=None,
+        help="Copy completed (compressed) day files here, e.g. a Dropbox/iCloud folder, so another "
+             "machine can pick them up. Only finished days are copied; today's is still being written.",
+    )
+    parser.add_argument(
         "--refresh-minutes", type=float, default=10.0,
         help="How often to re-discover markets and resubscribe. A 15-minute series rolls over "
              "constantly, so this must be well under the contract duration (default 10).",
@@ -298,7 +307,7 @@ def main() -> None:
     asyncio.run(
         run_capture(
             config, args.capture_dir, series, args.hours, args.max_markets,
-            refresh_minutes=args.refresh_minutes,
+            refresh_minutes=args.refresh_minutes, export_dir=args.export_dir,
         )
     )
 

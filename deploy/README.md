@@ -32,6 +32,32 @@ machine that stays on with a supervised service is the right one.
 `launchd` is the right supervisor on macOS — it starts the capture at boot, restarts it if it exits,
 and needs no login session.
 
+## Capture on the Mac, develop elsewhere
+
+A sensible split when the development machine is not always on: the Mac mini runs the capture
+around the clock, and analysis happens wherever you like. **The Mac does not need Claude Code for
+this** — only Python, the repo, credentials, and the service.
+
+Point the capture at a synced folder so completed days appear on the other machine automatically:
+
+```bash
+python capture_live.py --series KXBTC15M --hours 2 --refresh-minutes 5 \
+    --export-dir ~/Dropbox/kalshi-captures
+```
+
+Only *finished*, compressed days are exported. Today's file is still being appended to, and a sync
+client replicating a half-written file hands the other machine a truncated final line — so it stays
+behind until the day rolls over. Exports are idempotent, so nothing is copied twice.
+
+On the analysis machine, point the tools at the synced folder:
+
+```bash
+python -m scripts.build_timeseries --dir ~/Dropbox/kalshi-captures -o data/timeseries.csv
+```
+
+The trade-off is latency: you get data one day behind. To analyse the current day, copy `captures/`
+off the Mac directly (`scp`) instead of waiting for the export.
+
 ## Setup
 
 ```bash
